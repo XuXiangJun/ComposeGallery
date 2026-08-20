@@ -1,0 +1,32 @@
+# Gradle
+.gradle/
+build/
+
+# Kotlin
+.kotlin/
+
+# IntelliJ IDEA
+.idea/
+*.iml
+*.ipr
+*.iws
+out/
+
+# 本地配置（各人机器不同，勿提交）
+local.properties
+*.local
+
+# 日志与临时文件
+*.log
+*.tmp
+*.temp
+
+# 操作系统文件
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 打包输出（如分发包、exe、msi）
+*.exe
+*.msi
+*.zip
