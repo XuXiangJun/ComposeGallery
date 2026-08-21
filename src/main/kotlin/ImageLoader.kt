@@ -64,22 +64,16 @@ object ImageLoader {
             String(bytes, 0, 6, Charsets.US_ASCII) in setOf("GIF87a", "GIF89a")
 
         if (isGif) {
-            GifDecoder.decode(bytes)?.let { return LoadedImage.Animated(it) }
+            runCatching { GifDecoder.decode(bytes, maxDim) }.getOrNull()
+                ?.takeIf { it.frames.isNotEmpty() }
+                ?.let { return LoadedImage.Animated(it) }
         }
 
         return LoadedImage.Static(decodeScaled(bytes, maxDim))
     }
 
     private fun decodeThumbnail(bytes: ByteArray, targetDim: Int): ImageBitmap {
-        val isGif = bytes.size >= 6 &&
-            String(bytes, 0, 6, Charsets.US_ASCII) in setOf("GIF87a", "GIF89a")
-
-        if (isGif) {
-            runCatching {
-                GifDecoder.decode(bytes)?.frames?.firstOrNull()
-            }.getOrNull()?.let { return it }
-        }
-
+        // 缩略图用首帧即可：Skia 解码 GIF 取第一帧，再缩放到目标尺寸。
         return decodeScaled(bytes, targetDim)
     }
 

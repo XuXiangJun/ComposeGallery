@@ -28,18 +28,17 @@ dependencies {
     implementation("com.google.code.gson:gson:2.11.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-swing:1.10.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.1")
+
+    testImplementation(kotlin("test-junit5"))
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 
 kotlin {
     jvmToolchain(21)
 }
 
-tasks.register<JavaExec>("selftest") {
-    group = "verification"
-    description = "Run the headless image-loader self-test"
-    mainClass.set("gallery.SelfTestKt")
-    classpath = sourceSets["main"].runtimeClasspath
-    workingDir = projectDir
+tasks.test {
+    useJUnitPlatform()
 }
 
 // Wrap WiX light.exe so it appends "-sval" (skip ICE validation). ICE validation

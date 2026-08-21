@@ -9,7 +9,7 @@
 - 缩略图网格（自适应列数、可调大小、悬停高亮）
 - 可选递归扫描子文件夹
 - 排序：名称 / 修改时间 / 大小
-- 大图查看：鼠标滚轮缩放、拖拽平移、触控板捏合缩放、双击还原
+- 大图查看：鼠标滚轮缩放、拖拽平移、触控板捏合缩放、双击还原；支持动画 GIF 逐帧循环播放
 - 键盘：`←`/`→` 上一张/下一张、`Esc` 关闭、`F11` 全屏、`Delete` 删除（优先移入回收站）、`I` 信息、`空格` 幻灯片
 - **书架**：收藏文件夹/压缩包为「书」，显示封面、页码与进度，点击从上次进度继续阅读
 - **自动保存进度**：翻页/关闭时自动记录，进度持久化到 `~/.ComposeGallery/bookshelf.json`
@@ -35,8 +35,8 @@
 # 启动应用
 & D:\ai\gallery\build.ps1 run
 
-# 运行图片加载自测（无头，验证解码/缩放/内存安全）
-& D:\ai\gallery\build.ps1 selftest
+# 运行测试（JUnit 5 / kotlin.test，覆盖解码/缩放/内存/书架/动画 GIF）
+& D:\ai\gallery\build.ps1 test
 
 # 打包 Windows 安装程序（MSI）
 & D:\ai\gallery\build.ps1 packageMsi
@@ -82,7 +82,7 @@ D:\ai\.tools\gradle-8.14.2\bin\gradle.bat -p D:\ai\gallery run
 
 ```
 gallery/
-├── build.gradle.kts          # 构建脚本（含 selftest 任务 + 沙箱临时目录重定向）
+├── build.gradle.kts          # 构建脚本（含 JUnit5 测试 + 沙箱临时目录重定向 + 打包）
 ├── build.ps1                 # 一键构建/运行辅助脚本
 ├── settings.gradle.kts
 ├── gradle.properties
@@ -95,7 +95,6 @@ gallery/
     ├── ImageScanner.kt       # 目录/归档扫描
     ├── ImageLoader.kt        # Skia 解码 + 缩放 + 缩略图缓存
     ├── FileOps.kt            # 打开文件夹/压缩包/回收站/文件管理器
-    ├── SelfTest.kt           # 无头自测
     ├── resources/icon.ico    # 应用图标
     ├── packaging/
     │   └── LightWrapper.cs   # WiX light.exe 包装器（跳过 ICE 校验，沙箱打包用）
@@ -106,4 +105,6 @@ gallery/
         ├── ImageViewer.kt    # 大图查看（缩放/平移）
         ├── Thumbnail.kt      # 缩略图组件
         └── Theme.kt          # 暗色主题
+└── src/test/kotlin/gallery/
+    └── GalleryCoreTest.kt     # JUnit5/kotlin.test 测试（解码/缩放/内存/书架/动画 GIF）
 ```

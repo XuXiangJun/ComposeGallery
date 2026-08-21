@@ -137,28 +137,34 @@ fun ImageViewer(
                 )
             }
             li is LoadedImage.Animated -> {
-                var frameIndex by remember(li.animation) { mutableStateOf(0) }
-                var loopsCompleted by remember(li.animation) { mutableStateOf(0) }
                 val frames = li.animation.frames
-                val delays = li.animation.delaysMs
-                val maxLoops = if (li.animation.loopCount > 0) li.animation.loopCount else null
-
-                LaunchedEffect(frames, delays, maxLoops) {
-                    while (isActive && (maxLoops == null || loopsCompleted < maxLoops)) {
-                        kotlinx.coroutines.delay(delays.getOrElse(frameIndex) { 100 }.toLong())
-                        val nextIndex = (frameIndex + 1) % frames.size
-                        if (nextIndex == 0) loopsCompleted++
-                        frameIndex = nextIndex
+                if (frames.isEmpty()) {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Text("无法解码此动画", color = Color(0xFFAAAAAA))
                     }
-                }
+                } else {
+                    var frameIndex by remember(li.animation) { mutableStateOf(0) }
+                    var loopsCompleted by remember(li.animation) { mutableStateOf(0) }
+                    val delays = li.animation.delaysMs
+                    val maxLoops = if (li.animation.loopCount > 0) li.animation.loopCount else null
 
-                ZoomableImage(
-                    bitmap = frames[frameIndex],
-                    zoom = zoom,
-                    modifier = Modifier.fillMaxSize(),
-                    onTap = onToggleUi,
-                    onDoubleTap = { zoom.toFit() },
-                )
+                    LaunchedEffect(frames, delays, maxLoops) {
+                        while (isActive && (maxLoops == null || loopsCompleted < maxLoops)) {
+                            kotlinx.coroutines.delay(delays.getOrElse(frameIndex) { 100 }.toLong())
+                            val nextIndex = (frameIndex + 1) % frames.size
+                            if (nextIndex == 0) loopsCompleted++
+                            frameIndex = nextIndex
+                        }
+                    }
+
+                    ZoomableImage(
+                        bitmap = frames[frameIndex],
+                        zoom = zoom,
+                        modifier = Modifier.fillMaxSize(),
+                        onTap = onToggleUi,
+                        onDoubleTap = { zoom.toFit() },
+                    )
+                }
             }
         }
 
