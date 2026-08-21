@@ -24,7 +24,7 @@ import androidx.compose.material.LinearProgressIndicator
 import androidx.compose.material.Surface
 import androidx.compose.material.Text
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -59,7 +59,7 @@ fun BookshelfScreen(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 IconButton(onClick = onBack) {
-                    Icon(Icons.Filled.ArrowBack, "返回", tint = Color(0xFFBBBBBB))
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回", tint = Color(0xFFBBBBBB))
                 }
                 Text("书架", color = Color(0xFFE6E6E6), fontSize = 18.sp)
                 Spacer(Modifier.weight(1f))

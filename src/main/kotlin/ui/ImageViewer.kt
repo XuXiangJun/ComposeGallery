@@ -24,11 +24,11 @@ import androidx.compose.material.Surface
 import androidx.compose.material.Text
 import androidx.compose.material.TextButton
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.KeyboardArrowLeft
-import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.runtime.Composable
@@ -254,10 +254,10 @@ private fun BoxScope.ViewerBottomBar(
         horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         IconButton(onClick = onPrev) {
-            Icon(Icons.Filled.KeyboardArrowLeft, "上一张", tint = Color.White)
+            Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, "上一张", tint = Color.White)
         }
         IconButton(onClick = onNext) {
-            Icon(Icons.Filled.KeyboardArrowRight, "下一张", tint = Color.White)
+            Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, "下一张", tint = Color.White)
         }
         Spacer(Modifier.width(8.dp))
         TextButton(onClick = onFit) { Text("适应", color = Color.White) }
