@@ -58,6 +58,11 @@ val wrapWixLight = tasks.register("wrapWixLight") {
             logger.lifecycle("light.exe missing; skipping wrapper install")
             return@doLast
         }
+        // 非沙箱机器：WiX 缓存不在本机路径，且 ICE 校验通常能通过，跳过包装。
+        if (!wixZip.exists()) {
+            logger.lifecycle("wix311.zip not found (non-sandbox); skipping light.exe wrapper - ICE validation should pass normally")
+            return@doLast
+        }
 
         // Extract the full original WiX toolset into real/ — light.exe depends on
         // several sibling DLLs, not just wix.dll, and must keep its original name.
@@ -95,14 +100,16 @@ val wrapWixLight = tasks.register("wrapWixLight") {
 }
 
 // The DSH sandbox's default temp dir may not exist by the time a child JVM starts,
-// and Skiko unpacks its native library under `user.home/.skiko` (which the sandbox
-// cannot write). Point every forked JVM at writable, stable workspace directories.
+// The DSH sandbox may not have a writable default temp dir and blocks user.home/.skiko.
+// Only redirect when the sandbox workspace dir exists; on normal machines use defaults.
 tasks.withType<JavaExec>().configureEach {
-    val workTmp = "D:\\ai\\.tools\\tmp"
-    systemProperty("java.io.tmpdir", workTmp)
-    systemProperty("skiko.data.path", "D:\\ai\\.tools\\skiko")
-    environment("TMP", workTmp)
-    environment("TEMP", workTmp)
+    val sandboxTmp = File("D:\\ai\\.tools\\tmp")
+    if (sandboxTmp.exists()) {
+        systemProperty("java.io.tmpdir", sandboxTmp.absolutePath)
+        systemProperty("skiko.data.path", "D:\\ai\\.tools\\skiko")
+        environment("TMP", sandboxTmp.absolutePath)
+        environment("TEMP", sandboxTmp.absolutePath)
+    }
 }
 
 compose.desktop {
@@ -151,7 +158,9 @@ val packageZip = tasks.register("packageZip") {
             if (f.isFile) f.copyTo(File(libsDir, f.name), overwrite = true)
         }
 
-        val jpackage = "D:\\ai\\.tools\\jdk21\\jdk-21.0.12+8\\bin\\jpackage.exe"
+        // 用 Gradle 运行 JDK 里的 jpackage（JAVA_HOME 需为含 jpackage 的 JDK，避免硬编码本机路径）。
+        val jpHome = File(System.getProperty("java.home"))
+        val jpackage = File(jpHome, "bin/jpackage.exe").absolutePath
         val runtimeImage = File(buildDir, "compose/tmp/main/runtime")
         val destDir = File(buildDir, "compose/binaries/main/app")
         destDir.mkdirs()

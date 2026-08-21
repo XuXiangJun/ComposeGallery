@@ -26,26 +26,37 @@
 
 ## 运行
 
-本机已准备独立的 JDK 21 与 Gradle（位于 `D:\ai\.tools`），并写好了 `build.ps1`
-（它会固定 JDK、把 Gradle 缓存/临时目录/skiko 解压目录都重定向到工作区，规避沙箱限制）。
+### 其他电脑（新克隆项目）
 
-在 PowerShell 中：
+你需要自己安装 **JDK 21**（并设置好 `JAVA_HOME`，项目用 `jvmToolchain(21)`）。
+**无需手动装 Gradle**——项目自带 Gradle Wrapper，首次运行会自动下载 Gradle 8.14.2；
+依赖会从 Maven Central 自动下载。
 
 ```powershell
-# 启动应用
-& D:\ai\gallery\build.ps1 run
+# Windows（项目根目录下）
+.\gradlew.bat run          # 启动
+.\gradlew.bat test         # 跑测试
+.\gradlew.bat packageMsi   # 打 MSI（需联网下载 WiX）
+.\gradlew.bat packageZip   # 打免安装 zip
 
-# 运行测试（JUnit 5 / kotlin.test，覆盖解码/缩放/内存/书架/动画 GIF）
-& D:\ai\gallery\build.ps1 test
+# macOS / Linux 用 ./gradlew ...
+```
 
-# 打包 Windows 安装程序（MSI）
-& D:\ai\gallery\build.ps1 packageMsi
+> 说明：`packageMsi` 在普通 Windows 上能正常做 ICE 校验；`wrapWixLight` 的 light.exe
+> 包装器只在沙箱环境（WiX 缓存存在）时启用，普通机器会自动跳过。
+
+### 本机沙箱环境
+
+本机使用封装好的 `build.ps1`（固定 JDK 21 / Gradle 路径，并把缓存、临时目录、skiko 解压目录
+重定向到 `D:\ai\.tools`，规避沙箱对 `C:\Users\...` 的写入限制）：
+
+```powershell
+& D:\ai\gallery\build.ps1 run          # 启动
+& D:\ai\gallery\build.ps1 test         # 跑测试
+& D:\ai\gallery\build.ps1 packageMsi   # 打 MSI
+& D:\ai\gallery\build.ps1 packageZip   # 打免安装 zip
 # 产物：build\compose\binaries\main\msi\ComposeGallery-1.0.0.msi
-
-# 打包免安装 zip（jpackage app-image + zip）
-& D:\ai\gallery\build.ps1 packageZip
-# 产物：build\compose\binaries\main\app\ComposeGallery-1.0.0-portable.zip
-# 解压后运行其中的 ComposeGallery.exe 即可，无需安装
+#       build\compose\binaries\main\app\ComposeGallery-1.0.0-portable.zip
 ```
 
 ### 打包说明
