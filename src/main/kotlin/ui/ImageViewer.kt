@@ -35,6 +35,16 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.runtime.Composable
+import gallery.ui.ViewerBackground
+import gallery.ui.ViewerBody
+import gallery.ui.ViewerCaption
+import gallery.ui.ViewerDim
+import gallery.ui.ViewerIcon
+import gallery.ui.ViewerIconSurface
+import gallery.ui.ViewerMuted
+import gallery.ui.ViewerPanelScrim
+import gallery.ui.ViewerScrim
+import gallery.ui.ViewerSubtle
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
@@ -128,7 +138,7 @@ fun ImageViewer(
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         CircularProgressIndicator(color = Accent)
                         Spacer(Modifier.height(8.dp))
-                        Text("加载中…", color = Color(0xFFAAAAAA), fontSize = 13.sp)
+                        Text("加载中…", color = ViewerMuted, fontSize = 13.sp)
                     }
                 }
             }
@@ -145,7 +155,7 @@ fun ImageViewer(
                 val frames = li.animation.frames
                 if (frames.isEmpty()) {
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Text("无法解码此动画", color = Color(0xFFAAAAAA))
+                        Text("无法解码此动画", color = ViewerMuted)
                     }
                 } else {
                     var frameIndex by remember(li.animation) { mutableStateOf(0) }
@@ -216,7 +226,7 @@ private fun BoxScope.ViewerTopBar(
 ) {
     Row(
         Modifier.align(Alignment.TopCenter).fillMaxWidth()
-            .background(Color(0xCC000000))
+            .background(ViewerScrim)
             .padding(horizontal = 12.dp, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -228,15 +238,15 @@ private fun BoxScope.ViewerTopBar(
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
-        Text("${index + 1} / $total", color = Color(0xFFBBBBBB), fontSize = 13.sp)
+        Text("${index + 1} / $total", color = ViewerSubtle, fontSize = 13.sp)
         IconButton(onClick = onToggleSlideshow) {
-            Icon(Icons.Filled.PlayArrow, "幻灯片", tint = if (slideshow) Accent else Color.White)
+            Icon(Icons.Filled.PlayArrow, "幻灯片", tint = if (slideshow) Accent else ViewerIcon)
         }
         IconButton(onClick = onToggleInfo) {
-            Icon(Icons.Filled.Info, "信息", tint = Color.White)
+            Icon(Icons.Filled.Info, "信息", tint = ViewerIcon)
         }
         IconButton(onClick = onClose) {
-            Icon(Icons.Filled.Close, "关闭", tint = Color.White)
+            Icon(Icons.Filled.Close, "关闭", tint = ViewerIcon)
         }
     }
 }
@@ -257,25 +267,25 @@ private fun BoxScope.ViewerBottomBar(
 ) {
     Row(
         Modifier.align(Alignment.BottomCenter).fillMaxWidth()
-            .background(Color(0xCC000000))
+            .background(ViewerScrim)
             .padding(horizontal = 12.dp, vertical = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         IconButton(onClick = onPrev) {
-            Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, "上一张", tint = Color.White)
+            Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, "上一张", tint = ViewerIcon)
         }
         IconButton(onClick = onNext) {
-            Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, "下一张", tint = Color.White)
+            Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, "下一张", tint = ViewerIcon)
         }
         Spacer(Modifier.width(8.dp))
-        TextButton(onClick = onFit) { Text("适应", color = Color.White) }
-        TextButton(onClick = onActual) { Text("1:1", color = Color.White) }
-        TextButton(onClick = onZoomOut) { Text("−", color = Color.White, fontSize = 16.sp) }
-        TextButton(onClick = onZoomIn) { Text("+", color = Color.White, fontSize = 16.sp) }
+        TextButton(onClick = onFit) { Text("适应", color = ViewerIcon) }
+        TextButton(onClick = onActual) { Text("1:1", color = ViewerIcon) }
+        TextButton(onClick = onZoomOut) { Text("−", color = ViewerIcon, fontSize = 16.sp) }
+        TextButton(onClick = onZoomIn) { Text("+", color = ViewerIcon, fontSize = 16.sp) }
         Spacer(Modifier.weight(1f))
         IconButton(onClick = onOpenInFolder) {
-            Icon(Icons.Filled.Search, "在文件夹中显示", tint = Color.White)
+            Icon(Icons.Filled.Search, "在文件夹中显示", tint = ViewerIcon)
         }
         Slider(
             value = slideshowSeconds,
@@ -283,9 +293,9 @@ private fun BoxScope.ViewerBottomBar(
             valueRange = 1f..10f,
             modifier = Modifier.width(90.dp),
         )
-        Text("间隔 ${slideshowSeconds.toInt()}s", color = Color.White, fontSize = 12.sp)
+        Text("间隔 ${slideshowSeconds.toInt()}s", color = ViewerIcon, fontSize = 12.sp)
         IconButton(onClick = onDelete, enabled = canDelete) {
-            Icon(Icons.Filled.Delete, "删除", tint = if (canDelete) Color.White else Color(0xFF666666))
+            Icon(Icons.Filled.Delete, "删除", tint = if (canDelete) ViewerIcon else ViewerDim)
         }
     }
 }
@@ -294,7 +304,7 @@ private fun BoxScope.ViewerBottomBar(
 private fun BoxScope.InfoPanel(item: ImageItem, loadedImage: LoadedImage?) {
     Surface(
         Modifier.align(Alignment.CenterEnd).width(300.dp).fillMaxHeight(),
-        color = Color(0xE6000000),
+        color = ViewerPanelScrim,
     ) {
         Column(
             Modifier.padding(16.dp).verticalScroll(rememberScrollState()),
@@ -316,10 +326,10 @@ private fun BoxScope.InfoPanel(item: ImageItem, loadedImage: LoadedImage?) {
 @Composable
 private fun InfoRow(label: String, value: String) {
     Column {
-        Text(label, color = Color(0xFF999999), fontSize = 11.sp)
+        Text(label, color = ViewerCaption, fontSize = 11.sp)
         Text(
             value,
-            color = Color(0xFFEEEEEE),
+            color = ViewerBody,
             fontSize = 13.sp,
             modifier = Modifier.fillMaxWidth(),
             maxLines = 2,

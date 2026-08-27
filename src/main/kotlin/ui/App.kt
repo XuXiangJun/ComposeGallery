@@ -376,6 +376,7 @@ fun App(state: AppState, onToggleFullscreen: () -> Unit) {
                     onHelp = { state.showHelp = true },
                     recent = state.recent,
                     onOpenRecent = { openRecent(it) },
+                    selectedItem = state.current.takeIf { state.selectedIndex >= 0 },
                 )
             }
         }

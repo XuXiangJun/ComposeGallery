@@ -23,6 +23,7 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.Checkbox
 import androidx.compose.material.DropdownMenu
@@ -39,6 +40,8 @@ import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
@@ -51,8 +54,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -92,6 +98,7 @@ fun GalleryScreen(
     onHelp: () -> Unit,
     recent: List<RecentEntry>,
     onOpenRecent: (RecentEntry) -> Unit,
+    selectedItem: ImageItem? = null,
 ) {
     val query = searchQuery.trim()
     val visible = if (query.isEmpty()) images else images.filter { it.name.contains(query, ignoreCase = true) }
@@ -144,7 +151,12 @@ fun GalleryScreen(
                 modifier = Modifier.fillMaxSize(),
             ) {
                 items(visible, key = { it.source.cacheKey }) { item ->
-                    ThumbnailCell(item, thumbSize, onClick = { onImageClick(item) })
+                    ThumbnailCell(
+                        item = item,
+                        thumbSize = thumbSize,
+                        onClick = { onImageClick(item) },
+                        isSelected = item == selectedItem,
+                    )
                 }
             }
         }
@@ -179,89 +191,197 @@ private fun Toolbar(
     onHelp: () -> Unit,
 ) {
     val colors = LocalGalleryColors.current
+    var moreExpanded by remember { mutableStateOf(false) }
     Surface(elevation = 4.dp) {
-        Column(Modifier.fillMaxWidth().padding(horizontal = GalleryTokens.spacingM)) {
-            // 第一行：主操作
-            Row(
-                Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(GalleryTokens.spacingS),
-            ) {
-                TextButton(onClick = onOpenFolder) { Text("打开文件夹") }
-                TextButton(onClick = onOpenArchive) { Text("打开压缩包") }
-                TextButton(onClick = onOpenBookshelf) { Text("书架") }
-                IconButton(onClick = onRefresh) {
-                    Icon(Icons.Filled.Refresh, "刷新", tint = colors.onSurface)
-                }
-                Spacer(Modifier.weight(1f))
-                Text(
-                    text = if (folderName == null) "$total 张"
-                    else if (searching) "$visibleCount / $total 张"
-                    else "$folderName · $total 张",
-                    fontSize = GalleryTokens.textSmall,
-                    color = colors.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Spacer(Modifier.width(GalleryTokens.spacingS))
-                TextButton(onClick = onAddToBookshelf, enabled = total > 0 && !isInBookshelf) {
-                    if (isInBookshelf) {
-                        Text("已在书架", color = colors.onSurfaceMuted)
-                    } else {
-                        Icon(Icons.Filled.Star, null, modifier = Modifier.size(18.dp), tint = colors.primary)
-                        Text("加入书架")
-                    }
-                }
-                TextButton(onClick = onSlideshow, enabled = total > 0) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = GalleryTokens.spacingM, vertical = GalleryTokens.spacingS),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(GalleryTokens.spacingS),
+        ) {
+            TextButton(onClick = onOpenFolder) { Text("打开文件夹") }
+            TextButton(onClick = onOpenArchive) { Text("打开压缩包") }
+            IconButton(onClick = onRefresh) {
+                Icon(Icons.Filled.Refresh, "刷新", tint = colors.onSurface)
+            }
+            TextButton(onClick = onOpenBookshelf) { Text("书架") }
+            Spacer(Modifier.width(GalleryTokens.spacingS))
+            SearchField(searchQuery, onSearchChange, modifier = Modifier.width(220.dp))
+            if (total > 0) {
+                TextButton(onClick = onSlideshow) {
                     Icon(Icons.Filled.PlayArrow, null, modifier = Modifier.size(18.dp))
                     Text("幻灯片")
                 }
             }
-            // 第二行：搜索 + 设置
-            Row(
-                Modifier.fillMaxWidth().padding(bottom = GalleryTokens.spacingS),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(GalleryTokens.spacingS),
-            ) {
-                SearchField(searchQuery, onSearchChange)
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Checkbox(checked = recursive, onCheckedChange = onRecursiveChange)
-                    Text("含子文件夹", fontSize = GalleryTokens.textSmall, color = colors.onSurfaceVariant)
+            Spacer(Modifier.weight(1f))
+            Text(
+                text = if (folderName == null) "$total 张"
+                else if (searching) "$visibleCount / $total 张"
+                else "$folderName · $total 张",
+                fontSize = GalleryTokens.textSmall,
+                color = colors.onSurfaceMuted,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Box {
+                IconButton(onClick = { moreExpanded = true }) {
+                    Icon(Icons.Filled.MoreVert, "更多", tint = colors.onSurface)
                 }
-                SortMenu(sortMode, onSortChange)
-                IconButton(onClick = onToggleSortDirection, modifier = Modifier.size(28.dp)) {
-                    Icon(
-                        if (sortDirection == SortDirection.ASC) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
-                        "排序方向：${sortDirection.label}",
-                        tint = colors.primary,
-                    )
+                DropdownMenu(expanded = moreExpanded, onDismissRequest = { moreExpanded = false }) {
+                    if (total > 0 && !isInBookshelf) {
+                        DropdownMenuItem(onClick = { onAddToBookshelf(); moreExpanded = false }) {
+                            Icon(Icons.Filled.Star, null, tint = colors.primary, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(GalleryTokens.spacingS))
+                            Text("加入书架")
+                        }
+                    }
+                    var sortSubExpanded by remember { mutableStateOf(false) }
+                    Box {
+                        DropdownMenuItem(onClick = { sortSubExpanded = true }) {
+                            Icon(
+                                imageVector = if (sortDirection == SortDirection.ASC) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp),
+                                tint = colors.onSurface,
+                            )
+                            Spacer(Modifier.width(GalleryTokens.spacingS))
+                            Text("排序")
+                            Spacer(Modifier.weight(1f))
+                            Text(
+                                text = "▸",
+                                color = colors.onSurfaceMuted,
+                                fontSize = 16.sp,
+                            )
+                        }
+                        DropdownMenu(
+                            expanded = sortSubExpanded,
+                            onDismissRequest = { sortSubExpanded = false },
+                        ) {
+                            DropdownMenuItem(onClick = {
+                                onToggleSortDirection()
+                                sortSubExpanded = false
+                                moreExpanded = false
+                            }) {
+                                Icon(
+                                    if (sortDirection == SortDirection.ASC) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
+                                    null,
+                                    tint = colors.primary,
+                                    modifier = Modifier.size(18.dp),
+                                )
+                                Spacer(Modifier.width(GalleryTokens.spacingS))
+                                Text(if (sortDirection == SortDirection.ASC) "升序" else "降序")
+                            }
+                            DropdownMenuItem(onClick = {
+                                onSortChange(SortMode.NAME)
+                                sortSubExpanded = false
+                                moreExpanded = false
+                            }) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    if (sortMode == SortMode.NAME) {
+                                        Icon(
+                                            Icons.Filled.Check,
+                                            null,
+                                            tint = colors.primary,
+                                            modifier = Modifier.size(18.dp),
+                                        )
+                                    } else {
+                                        Spacer(Modifier.size(18.dp))
+                                    }
+                                    Spacer(Modifier.width(GalleryTokens.spacingS))
+                                    Text("按名称排序")
+                                }
+                            }
+                            DropdownMenuItem(onClick = {
+                                onSortChange(SortMode.SIZE)
+                                sortSubExpanded = false
+                                moreExpanded = false
+                            }) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    if (sortMode == SortMode.SIZE) {
+                                        Icon(
+                                            Icons.Filled.Check,
+                                            null,
+                                            tint = colors.primary,
+                                            modifier = Modifier.size(18.dp),
+                                        )
+                                    } else {
+                                        Spacer(Modifier.size(18.dp))
+                                    }
+                                    Spacer(Modifier.width(GalleryTokens.spacingS))
+                                    Text("按大小排序")
+                                }
+                            }
+                            DropdownMenuItem(onClick = {
+                                onSortChange(SortMode.DATE)
+                                sortSubExpanded = false
+                                moreExpanded = false
+                            }) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    if (sortMode == SortMode.DATE) {
+                                        Icon(
+                                            Icons.Filled.Check,
+                                            null,
+                                            tint = colors.primary,
+                                            modifier = Modifier.size(18.dp),
+                                        )
+                                    } else {
+                                        Spacer(Modifier.size(18.dp))
+                                    }
+                                    Spacer(Modifier.width(GalleryTokens.spacingS))
+                                    Text("按修改时间排序")
+                                }
+                            }
+                        }
+                    }
+                    DropdownMenuItem(onClick = { onRecursiveChange(!recursive); moreExpanded = false }) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(checked = recursive, onCheckedChange = null)
+                            Spacer(Modifier.width(GalleryTokens.spacingS))
+                            Text(if (recursive) "含子文件夹 ✓" else "含子文件夹")
+                        }
+                    }
+                    DropdownMenuItem(onClick = {
+                        onSetTheme(
+                            when (themeMode) {
+                                ThemeMode.SYSTEM -> ThemeMode.LIGHT
+                                ThemeMode.LIGHT -> ThemeMode.DARK
+                                ThemeMode.DARK -> ThemeMode.SYSTEM
+                            }
+                        )
+                        moreExpanded = false
+                    }) {
+                        Text("切换主题：${themeMode.label}")
+                    }
+                    DropdownMenuItem(onClick = { onHelp(); moreExpanded = false }) {
+                        Text("帮助")
+                    }
                 }
-                Spacer(Modifier.width(GalleryTokens.spacingXs))
-                Text("缩略图", fontSize = GalleryTokens.textSmall, color = colors.onSurfaceVariant)
-                Slider(
-                    value = thumbSize,
-                    onValueChange = onThumbSizeChange,
-                    valueRange = 120f..300f,
-                    modifier = Modifier.width(140.dp),
-                )
-                Spacer(Modifier.weight(1f))
-                ThemeMenu(themeMode, onSetTheme)
-                TextButton(onClick = onHelp) { Text("?", fontSize = GalleryTokens.textBody) }
             }
         }
     }
 }
 
 @Composable
-private fun SearchField(value: String, onValueChange: (String) -> Unit) {
+private fun SearchField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
     val colors = LocalGalleryColors.current
+    val interaction = remember { MutableInteractionSource() }
+    val focused by interaction.collectIsFocusedAsState()
     Surface(
-        modifier = Modifier.width(220.dp).height(36.dp),
+        modifier = modifier.height(36.dp),
         shape = GalleryTokens.shapeS,
         color = colors.surfaceHigh,
-        border = BorderStroke(1.dp, colors.outline),
+        border = BorderStroke(
+            width = if (focused) 2.dp else 1.dp,
+            color = if (focused) colors.primary else colors.outline,
+        ),
     ) {
-        Row(Modifier.padding(horizontal = GalleryTokens.spacingS), verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            Modifier.padding(horizontal = GalleryTokens.spacingS),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             Icon(Icons.Filled.Search, "搜索", tint = colors.onSurfaceMuted, modifier = Modifier.size(18.dp))
             Box(Modifier.weight(1f).padding(horizontal = GalleryTokens.spacingS)) {
                 BasicTextField(
@@ -270,7 +390,10 @@ private fun SearchField(value: String, onValueChange: (String) -> Unit) {
                     singleLine = true,
                     textStyle = TextStyle(color = colors.onSurface, fontSize = GalleryTokens.textBody),
                     cursorBrush = SolidColor(colors.primary),
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .semantics { contentDescription = "搜索图片" },
+                    interactionSource = interaction,
                     decorationBox = { inner ->
                         if (value.isEmpty()) {
                             Text("搜索图片…", color = colors.onSurfaceMuted, fontSize = GalleryTokens.textBody)
@@ -280,7 +403,10 @@ private fun SearchField(value: String, onValueChange: (String) -> Unit) {
                 )
             }
             if (value.isNotEmpty()) {
-                IconButton(onClick = { onValueChange("") }, modifier = Modifier.size(20.dp)) {
+                IconButton(
+                    onClick = { onValueChange("") },
+                    modifier = Modifier.size(24.dp),
+                ) {
                     Icon(Icons.Filled.Close, "清除搜索", tint = colors.onSurfaceMuted, modifier = Modifier.size(16.dp))
                 }
             }
@@ -372,7 +498,12 @@ private fun EmptyState(
 }
 
 @Composable
-private fun ThumbnailCell(item: ImageItem, thumbSize: Float, onClick: () -> Unit) {
+private fun ThumbnailCell(
+    item: ImageItem,
+    thumbSize: Float,
+    onClick: () -> Unit,
+    isSelected: Boolean = false,
+) {
     val colors = LocalGalleryColors.current
     val density = LocalDensity.current
     val targetPx = (thumbSize * density.density).roundToInt().coerceIn(160, 640)
@@ -383,14 +514,36 @@ private fun ThumbnailCell(item: ImageItem, thumbSize: Float, onClick: () -> Unit
             .clip(GalleryTokens.shapeS)
             .background(colors.surfaceHigh)
             .border(
-                width = if (hovered) 2.dp else 1.dp,
-                color = if (hovered) colors.outlineHover else colors.outline,
+                width = if (isSelected) 2.dp else if (hovered) 2.dp else 1.dp,
+                color = if (isSelected) colors.primary else if (hovered) colors.outlineHover else colors.outline,
                 shape = GalleryTokens.shapeS,
             )
             .clickable(interactionSource = interaction, indication = null, onClick = onClick),
     ) {
         Box(Modifier.fillMaxWidth().aspectRatio(1f)) {
             Thumbnail(item.source, item.name, targetPx, Modifier.fillMaxSize())
+            if (isSelected) {
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .background(colors.primary.copy(alpha = 0.12f)),
+                )
+                Box(
+                    Modifier
+                        .size(24.dp)
+                        .align(Alignment.TopEnd)
+                        .background(colors.primary, GalleryTokens.shapeS)
+                        .padding(4.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.PlayArrow,
+                        contentDescription = null,
+                        tint = Color.White,
+                        modifier = Modifier.size(14.dp),
+                    )
+                }
+            }
         }
         Text(
             item.name,
