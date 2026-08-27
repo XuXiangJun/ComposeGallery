@@ -1,5 +1,6 @@
 package gallery.ui
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.rememberScrollState
@@ -312,6 +313,7 @@ fun App(state: AppState, onToggleFullscreen: () -> Unit) {
         Box(
             Modifier
                 .fillMaxSize()
+                .background(LocalGalleryColors.current.background)
                 .focusRequester(focusRequester)
                 .focusable()
                 .onPreviewKeyEvent { handleKey(it) },

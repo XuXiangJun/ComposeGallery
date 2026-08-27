@@ -103,7 +103,11 @@ fun GalleryScreen(
     val query = searchQuery.trim()
     val visible = if (query.isEmpty()) images else images.filter { it.name.contains(query, ignoreCase = true) }
 
-    Column(Modifier.fillMaxSize()) {
+    Column(
+        Modifier
+            .fillMaxSize()
+            .background(LocalGalleryColors.current.background),
+    ) {
         Toolbar(
             folderName = folderName,
             total = images.size,
@@ -227,6 +231,13 @@ private fun Toolbar(
                     Icon(Icons.Filled.MoreVert, "更多", tint = colors.onSurface)
                 }
                 DropdownMenu(expanded = moreExpanded, onDismissRequest = { moreExpanded = false }) {
+                    DropdownMenuItem(onClick = { onRecursiveChange(!recursive); moreExpanded = false }) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(checked = recursive, onCheckedChange = null)
+                            Spacer(Modifier.width(GalleryTokens.spacingS))
+                            Text(if (recursive) "含子文件夹 ✓" else "含子文件夹")
+                        }
+                    }
                     if (total > 0 && !isInBookshelf) {
                         DropdownMenuItem(onClick = { onAddToBookshelf(); moreExpanded = false }) {
                             Icon(Icons.Filled.Star, null, tint = colors.primary, modifier = Modifier.size(18.dp))
@@ -332,24 +343,44 @@ private fun Toolbar(
                             }
                         }
                     }
-                    DropdownMenuItem(onClick = { onRecursiveChange(!recursive); moreExpanded = false }) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Checkbox(checked = recursive, onCheckedChange = null)
-                            Spacer(Modifier.width(GalleryTokens.spacingS))
-                            Text(if (recursive) "含子文件夹 ✓" else "含子文件夹")
+                    var themeSubExpanded by remember { mutableStateOf(false) }
+                    Box {
+                        DropdownMenuItem(onClick = { themeSubExpanded = true }) {
+                            Text("主题")
+                            Spacer(Modifier.weight(1f))
+                            Text(
+                                text = "▸",
+                                color = colors.onSurfaceMuted,
+                                fontSize = 16.sp,
+                            )
                         }
-                    }
-                    DropdownMenuItem(onClick = {
-                        onSetTheme(
-                            when (themeMode) {
-                                ThemeMode.SYSTEM -> ThemeMode.LIGHT
-                                ThemeMode.LIGHT -> ThemeMode.DARK
-                                ThemeMode.DARK -> ThemeMode.SYSTEM
+                        DropdownMenu(
+                            expanded = themeSubExpanded,
+                            onDismissRequest = { themeSubExpanded = false },
+                        ) {
+                            ThemeMode.entries.forEach { mode ->
+                                DropdownMenuItem(onClick = {
+                                    onSetTheme(mode)
+                                    themeSubExpanded = false
+                                    moreExpanded = false
+                                }) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        if (themeMode == mode) {
+                                            Icon(
+                                                Icons.Filled.Check,
+                                                null,
+                                                tint = colors.primary,
+                                                modifier = Modifier.size(18.dp),
+                                            )
+                                        } else {
+                                            Spacer(Modifier.size(18.dp))
+                                        }
+                                        Spacer(Modifier.width(GalleryTokens.spacingS))
+                                        Text(mode.label)
+                                    }
+                                }
                             }
-                        )
-                        moreExpanded = false
-                    }) {
-                        Text("切换主题：${themeMode.label}")
+                        }
                     }
                     DropdownMenuItem(onClick = { onHelp(); moreExpanded = false }) {
                         Text("帮助")

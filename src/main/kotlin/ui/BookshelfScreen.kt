@@ -75,7 +75,11 @@ fun BookshelfScreen(
             .getOrNull()
             ?.also { readerCache[path] = it }
 
-    Column(Modifier.fillMaxSize()) {
+    Column(
+        Modifier
+            .fillMaxSize()
+            .background(LocalGalleryColors.current.background),
+    ) {
         Surface(elevation = 4.dp) {
             Row(
                 Modifier.fillMaxWidth().padding(horizontal = GalleryTokens.spacingS, vertical = GalleryTokens.spacingS / 2),
