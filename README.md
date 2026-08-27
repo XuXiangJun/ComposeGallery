@@ -6,13 +6,16 @@
 
 - 打开文件夹，浏览 JPG / PNG / GIF / BMP / WebP / ICO / JFIF / AVIF 图片
 - 打开压缩包（**zip / 7z**），直接浏览压缩包内的图片（无需解压）
-- 缩略图网格（自适应列数、可调大小、悬停高亮）
+- 缩略图网格（自适应列数、可调大小、悬停高亮、加载骨架占位）
 - 可选递归扫描子文件夹
-- 排序：名称 / 修改时间 / 大小
+- 排序：名称 / 修改时间 / 大小，支持升序 / 降序
+- 文件名搜索过滤（工具栏搜索框，实时筛选）
 - 大图查看：鼠标滚轮缩放、拖拽平移、触控板捏合缩放、双击还原；支持动画 GIF 逐帧循环播放
-- 键盘：`←`/`→` 上一张/下一张、`Esc` 关闭、`F11` 全屏、`Delete` 删除（优先移入回收站）、`I` 信息、`空格` 幻灯片
+- 键盘：`←`/`→` 上一张/下一张、`Esc` 关闭、`F11` 全屏、`Delete` 删除（优先移入回收站）、`I` 信息、`空格` 幻灯片、`F1` 快捷键帮助
 - **书架**：收藏文件夹/压缩包为「书」，显示封面、页码与进度，点击从上次进度继续阅读
 - **自动保存进度**：翻页/关闭时自动记录，进度持久化到 `~/.ComposeGallery/bookshelf.json`
+- **主题**：浅色 / 深色 / 跟随系统（工具栏切换），并提供「最近打开」快捷入口
+- **幻灯片**：播放间隔可调（大图底部栏滑块）
 - 幻灯片播放、在文件管理器中定位、查看图片信息
 - 本地缩略图内存缓存（Skia 解码 + 双线性缩放）
 
@@ -56,7 +59,7 @@
 & D:\ai\gallery\build.ps1 packageMsi   # 打 MSI
 & D:\ai\gallery\build.ps1 packageZip   # 打免安装 zip
 # 产物：build\compose\binaries\main\msi\ComposeGallery-1.0.0.msi
-#       build\compose\binaries\main\app\ComposeGallery-1.0.0-portable.zip
+#       build\compose\binaries\main\app\ComposeGallery-1.0.0.zip
 ```
 
 ### 打包说明
@@ -84,10 +87,11 @@ D:\ai\.tools\gradle-8.14.2\bin\gradle.bat -p D:\ai\gallery run
 
 | 位置 | 操作 |
 | --- | --- |
-| 网格 | 点击缩略图打开大图；工具栏可「打开文件夹」「打开压缩包」「书架」「加入书架」、换排序、调缩略图大小、切换子文件夹扫描 |
+| 网格 | 点击缩略图打开大图；工具栏可「打开文件夹」「打开压缩包」「书架」「加入书架」、换排序与升降序、调缩略图大小、切换子文件夹扫描、搜索图片 |
+| 网格 | 未打开任何图集时显示「最近打开」快捷入口；工具栏可切换浅色 / 深色 / 跟随系统主题 |
 | 书架 | 点击「书架」进入；显示收藏的图集（封面 + 页码 + 进度），点击从上次进度继续，右上角 × 移出书架 |
-| 查看器 | 滚轮缩放、拖拽平移、双击还原；底部按钮支持适应 / 1:1 / 缩放 |
-| 快捷键 | `←`/`→` 上一张/下一张，`Esc` 关闭，`F11` 全屏，`Delete` 删除，`I` 信息，`空格` 幻灯片 |
+| 查看器 | 滚轮缩放、拖拽平移、双击还原；底部按钮支持适应 / 1:1 / 缩放，并可调幻灯片播放间隔 |
+| 快捷键 | `←`/`→` 上一张/下一张，`Esc` 关闭，`F11` 全屏，`Delete` 删除，`I` 信息，`空格` 幻灯片，`F1` 快捷键帮助，`Ctrl+O` 打开文件夹，`F5` 刷新 |
 
 ## 项目结构
 
@@ -99,9 +103,10 @@ gallery/
 ├── gradle.properties
 └── src/main/kotlin/
     ├── Main.kt               # 入口 + 全屏处理
-    ├── AppState.kt           # 应用状态 + 书架/进度逻辑
-    ├── Model.kt              # ImageSource / ImageItem / 排序
+    ├── AppState.kt           # 应用状态 + 书架/进度/最近打开/主题/搜索
+    ├── Model.kt              # ImageSource / ImageItem / 排序（含升降序）
     ├── Bookshelf.kt          # BookEntry + JSON 持久化（Gson）
+    ├── Settings.kt           # 主题模式/排序方向/幻灯片间隔/最近打开持久化（Gson）
     ├── ArchiveReader.kt      # 压缩包读取（zip / 7z）
     ├── ImageScanner.kt       # 目录/归档扫描
     ├── ImageLoader.kt        # Skia 解码 + 缩放 + 缩略图缓存
@@ -115,7 +120,7 @@ gallery/
         ├── BookshelfScreen.kt# 书架视图
         ├── ImageViewer.kt    # 大图查看（缩放/平移）
         ├── Thumbnail.kt      # 缩略图组件
-        └── Theme.kt          # 暗色主题
+        └── Theme.kt          # 主题（光/暗/跟随系统）+ 语义色/间距/圆角 token
 └── src/test/kotlin/gallery/
     └── GalleryCoreTest.kt     # JUnit5/kotlin.test 测试（解码/缩放/内存/书架/动画 GIF）
 ```

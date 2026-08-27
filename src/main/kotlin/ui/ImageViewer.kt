@@ -4,6 +4,8 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
@@ -20,6 +22,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.material.CircularProgressIndicator
 import androidx.compose.material.Icon
 import androidx.compose.material.IconButton
+import androidx.compose.material.Slider
 import androidx.compose.material.Surface
 import androidx.compose.material.Text
 import androidx.compose.material.TextButton
@@ -107,6 +110,8 @@ fun ImageViewer(
     onToggleUi: () -> Unit,
     onToggleSlideshow: () -> Unit,
     slideshow: Boolean,
+    slideshowSeconds: Float,
+    onSlideshowSecondsChange: (Float) -> Unit,
 ) {
     var loadedImage by remember(item) { mutableStateOf<LoadedImage?>(null) }
     val zoom = remember { ZoomState() }
@@ -188,6 +193,8 @@ fun ImageViewer(
                 onOpenInFolder = { openInFileManager(item.containerFile) },
                 onDelete = onDelete,
                 canDelete = item.file != null,
+                slideshowSeconds = slideshowSeconds,
+                onSlideshowSecondsChange = onSlideshowSecondsChange,
             )
         }
 
@@ -245,6 +252,8 @@ private fun BoxScope.ViewerBottomBar(
     onOpenInFolder: () -> Unit,
     onDelete: () -> Unit,
     canDelete: Boolean = true,
+    slideshowSeconds: Float,
+    onSlideshowSecondsChange: (Float) -> Unit,
 ) {
     Row(
         Modifier.align(Alignment.BottomCenter).fillMaxWidth()
@@ -268,6 +277,13 @@ private fun BoxScope.ViewerBottomBar(
         IconButton(onClick = onOpenInFolder) {
             Icon(Icons.Filled.Search, "在文件夹中显示", tint = Color.White)
         }
+        Slider(
+            value = slideshowSeconds,
+            onValueChange = onSlideshowSecondsChange,
+            valueRange = 1f..10f,
+            modifier = Modifier.width(90.dp),
+        )
+        Text("间隔 ${slideshowSeconds.toInt()}s", color = Color.White, fontSize = 12.sp)
         IconButton(onClick = onDelete, enabled = canDelete) {
             Icon(Icons.Filled.Delete, "删除", tint = if (canDelete) Color.White else Color(0xFF666666))
         }
@@ -281,7 +297,7 @@ private fun BoxScope.InfoPanel(item: ImageItem, loadedImage: LoadedImage?) {
         color = Color(0xE6000000),
     ) {
         Column(
-            Modifier.padding(16.dp),
+            Modifier.padding(16.dp).verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             Text("文件信息", color = Accent, fontSize = 14.sp)
@@ -301,7 +317,14 @@ private fun BoxScope.InfoPanel(item: ImageItem, loadedImage: LoadedImage?) {
 private fun InfoRow(label: String, value: String) {
     Column {
         Text(label, color = Color(0xFF999999), fontSize = 11.sp)
-        Text(value, color = Color(0xFFEEEEEE), fontSize = 13.sp, modifier = Modifier.fillMaxWidth())
+        Text(
+            value,
+            color = Color(0xFFEEEEEE),
+            fontSize = 13.sp,
+            modifier = Modifier.fillMaxWidth(),
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 

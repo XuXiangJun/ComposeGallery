@@ -140,7 +140,8 @@ val packageZip = tasks.register("packageZip") {
     description = "Build a portable zip distribution (jpackage app-image)"
     dependsOn("createRuntimeImage", "jar", "unpackDefaultComposeDesktopJvmApplicationResources")
     doLast {
-        val libsDir = File(buildDir, "compose/tmp/packageZip/libs")
+        val buildDirFile = layout.buildDirectory.asFile.get()
+        val libsDir = File(buildDirFile, "compose/tmp/packageZip/libs")
         libsDir.deleteRecursively()
         libsDir.mkdirs()
 
@@ -154,15 +155,15 @@ val packageZip = tasks.register("packageZip") {
         mainJar.copyTo(File(libsDir, mainJar.name), overwrite = true)
 
         // skiko 原生库 + icudtl.dat（Compose 已解压到 tmp/skiko）
-        File(buildDir, "compose/tmp/skiko").listFiles()?.forEach { f ->
+        File(buildDirFile, "compose/tmp/skiko").listFiles()?.forEach { f ->
             if (f.isFile) f.copyTo(File(libsDir, f.name), overwrite = true)
         }
 
         // 用 Gradle 运行 JDK 里的 jpackage（JAVA_HOME 需为含 jpackage 的 JDK，避免硬编码本机路径）。
         val jpHome = File(System.getProperty("java.home"))
         val jpackage = File(jpHome, "bin/jpackage.exe").absolutePath
-        val runtimeImage = File(buildDir, "compose/tmp/main/runtime")
-        val destDir = File(buildDir, "compose/binaries/main/app")
+        val runtimeImage = File(buildDirFile, "compose/tmp/main/runtime")
+        val destDir = File(buildDirFile, "compose/binaries/main/app")
         destDir.mkdirs()
         val appName = "ComposeGallery"
         // 清理上次生成的 app image，否则 jpackage 会因目录已存在而失败
@@ -192,7 +193,7 @@ val packageZip = tasks.register("packageZip") {
 
         // 打包成 zip
         val appDir = File(destDir, appName)
-        val zipFile = File(destDir, "ComposeGallery-${version}-portable.zip")
+        val zipFile = File(destDir, "ComposeGallery-${version}.zip")
         ZipOutputStream(zipFile.outputStream()).use { zos ->
             appDir.walkTopDown().forEach { f ->
                 val rel = appDir.toPath().relativize(f.toPath()).toString().replace('\\', '/')

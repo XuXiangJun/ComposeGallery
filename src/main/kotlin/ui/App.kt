@@ -1,8 +1,17 @@
 package gallery.ui
 
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.material.AlertDialog
 import androidx.compose.material.Text
 import androidx.compose.material.TextButton
@@ -23,11 +32,14 @@ import androidx.compose.ui.input.key.isCtrlPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.unit.dp
 import gallery.AppState
 import gallery.ArchiveReader
 import gallery.BookEntry
 import gallery.ImageItem
 import gallery.ImageScanner
+import gallery.RecentEntry
+import gallery.ThemeMode
 import gallery.moveToTrash
 import gallery.pickArchive
 import gallery.pickFolder
@@ -43,6 +55,12 @@ fun App(state: AppState, onToggleFullscreen: () -> Unit) {
     var pendingDelete by remember { mutableStateOf<ImageItem?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
 
+    val isDark = when (state.themeMode) {
+        ThemeMode.SYSTEM -> isSystemInDarkTheme()
+        ThemeMode.LIGHT -> false
+        ThemeMode.DARK -> true
+    }
+
     // 图集加载完成后恢复/重置查看进度。
     fun finishLoad() {
         if (state.resumeFromBook) {
@@ -57,7 +75,7 @@ fun App(state: AppState, onToggleFullscreen: () -> Unit) {
         val f = state.folder ?: return
         state.loading = true
         try {
-            state.images = sortImages(ImageScanner.scan(f, state.recursive), state.sortMode)
+            state.images = sortImages(ImageScanner.scan(f, state.recursive), state.sortMode, state.sortDirection)
             finishLoad()
         } finally {
             state.loading = false
@@ -71,7 +89,7 @@ fun App(state: AppState, onToggleFullscreen: () -> Unit) {
             val items = ImageScanner.scanArchive(archiveFile, newReader)
             state.archiveReader?.close()
             state.archiveReader = newReader
-            state.images = sortImages(items, state.sortMode)
+            state.images = sortImages(items, state.sortMode, state.sortDirection)
             finishLoad()
         } catch (t: Throwable) {
             error = "刷新失败：${t.message ?: t.toString()}"
@@ -86,8 +104,10 @@ fun App(state: AppState, onToggleFullscreen: () -> Unit) {
                 state.closeArchive()
                 state.resumeFromBook = false
                 state.folder = f
+                state.searchQuery = ""
                 state.closeViewer()
                 rescan()
+                state.addRecent(f.absolutePath, f.name, "folder")
             }
         }
     }
@@ -112,9 +132,11 @@ fun App(state: AppState, onToggleFullscreen: () -> Unit) {
             state.archive = f
             state.folder = null
             state.resumeFromBook = false
+            state.searchQuery = ""
             state.closeViewer()
-            state.images = sortImages(items, state.sortMode)
+            state.images = sortImages(items, state.sortMode, state.sortDirection)
             finishLoad()
+            state.addRecent(f.absolutePath, f.name, "archive")
         }
     }
 
@@ -123,6 +145,7 @@ fun App(state: AppState, onToggleFullscreen: () -> Unit) {
             state.closeArchive()
             state.showBookshelf = false
             state.resumeFromBook = true
+            state.searchQuery = ""
             if (book.type == "archive") {
                 val f = File(book.path)
                 val reader = try {
@@ -140,7 +163,7 @@ fun App(state: AppState, onToggleFullscreen: () -> Unit) {
                 state.archiveReader = reader
                 state.archive = f
                 state.folder = null
-                state.images = sortImages(items, state.sortMode)
+                state.images = sortImages(items, state.sortMode, state.sortDirection)
             } else {
                 val f = File(book.path)
                 if (!f.isDirectory) {
@@ -150,7 +173,50 @@ fun App(state: AppState, onToggleFullscreen: () -> Unit) {
                 state.folder = f
                 state.loading = true
                 try {
-                    state.images = sortImages(ImageScanner.scan(f, state.recursive), state.sortMode)
+                    state.images = sortImages(ImageScanner.scan(f, state.recursive), state.sortMode, state.sortDirection)
+                } finally {
+                    state.loading = false
+                }
+            }
+            finishLoad()
+        }
+    }
+
+    /** 从「最近打开」进入某个位置（不恢复书架进度）。 */
+    fun openRecent(entry: RecentEntry) {
+        scope.launch {
+            state.closeArchive()
+            state.showBookshelf = false
+            state.resumeFromBook = false
+            state.searchQuery = ""
+            if (entry.type == "archive") {
+                val f = File(entry.path)
+                val reader = try {
+                    ArchiveReader.open(f)
+                } catch (t: Throwable) {
+                    error = "无法打开压缩包：${t.message ?: t.toString()}"
+                    return@launch
+                }
+                val items = ImageScanner.scanArchive(f, reader)
+                if (items.isEmpty()) {
+                    reader.close()
+                    error = "压缩包内没有找到图片"
+                    return@launch
+                }
+                state.archiveReader = reader
+                state.archive = f
+                state.folder = null
+                state.images = sortImages(items, state.sortMode, state.sortDirection)
+            } else {
+                val f = File(entry.path)
+                if (!f.isDirectory) {
+                    error = "文件夹不存在：${f.absolutePath}"
+                    return@launch
+                }
+                state.folder = f
+                state.loading = true
+                try {
+                    state.images = sortImages(ImageScanner.scan(f, state.recursive), state.sortMode, state.sortDirection)
                 } finally {
                     state.loading = false
                 }
@@ -195,6 +261,10 @@ fun App(state: AppState, onToggleFullscreen: () -> Unit) {
             onToggleFullscreen()
             return true
         }
+        if (e.key == Key.F1) {
+            state.showHelp = true
+            return true
+        }
         if (!viewerOpen) {
             return when (e.key) {
                 Key.F5 -> { refresh(); true }
@@ -216,9 +286,9 @@ fun App(state: AppState, onToggleFullscreen: () -> Unit) {
         }
     }
 
-    // Re-sort in place when the sort mode changes.
-    LaunchedEffect(state.sortMode) {
-        state.images = sortImages(state.images, state.sortMode)
+    // Re-sort in place when the sort mode or direction changes.
+    LaunchedEffect(state.sortMode, state.sortDirection) {
+        state.images = sortImages(state.images, state.sortMode, state.sortDirection)
     }
 
     // 翻页时自动保存书架进度。
@@ -238,7 +308,7 @@ fun App(state: AppState, onToggleFullscreen: () -> Unit) {
         focusRequester.requestFocus()
     }
 
-    GalleryTheme {
+    GalleryTheme(isDark) {
         Box(
             Modifier
                 .fillMaxSize()
@@ -268,12 +338,18 @@ fun App(state: AppState, onToggleFullscreen: () -> Unit) {
                     onToggleUi = { state.showUi = !state.showUi },
                     onToggleSlideshow = { state.slideshow = !state.slideshow },
                     slideshow = state.slideshow,
+                    slideshowSeconds = state.slideshowSeconds,
+                    onSlideshowSecondsChange = { state.updateSlideshowSeconds(it) },
                 )
                 else -> GalleryScreen(
                     folderName = state.locationName,
                     images = state.images,
                     sortMode = state.sortMode,
+                    sortDirection = state.sortDirection,
                     onSortChange = { state.sortMode = it },
+                    onToggleSortDirection = { state.toggleSortDirection() },
+                    searchQuery = state.searchQuery,
+                    onSearchChange = { state.searchQuery = it },
                     thumbSize = state.thumbSize,
                     onThumbSizeChange = { state.thumbSize = it },
                     recursive = state.recursive,
@@ -295,6 +371,11 @@ fun App(state: AppState, onToggleFullscreen: () -> Unit) {
                     onOpenBookshelf = { state.showBookshelf = true },
                     isInBookshelf = state.isInBookshelf(),
                     onAddToBookshelf = { state.addToBookshelf() },
+                    themeMode = state.themeMode,
+                    onSetTheme = { state.updateThemeMode(it) },
+                    onHelp = { state.showHelp = true },
+                    recent = state.recent,
+                    onOpenRecent = { openRecent(it) },
                 )
             }
         }
@@ -327,5 +408,43 @@ fun App(state: AppState, onToggleFullscreen: () -> Unit) {
                 },
             )
         }
+
+        if (state.showHelp) {
+            HelpDialog(onDismiss = { state.showHelp = false })
+        }
     }
+}
+
+@Composable
+private fun HelpDialog(onDismiss: () -> Unit) {
+    val colors = LocalGalleryColors.current
+    val rows = listOf(
+        "Ctrl + O" to "打开文件夹",
+        "F5" to "刷新当前图集",
+        "F11" to "切换全屏",
+        "F1" to "显示本帮助",
+        "← / →" to "上一张 / 下一张",
+        "Esc" to "关闭大图",
+        "Delete" to "删除当前图片（优先移入回收站）",
+        "I" to "显示 / 隐藏图片信息",
+        "空格" to "开始 / 停止幻灯片",
+    )
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("快捷键") },
+        text = {
+            Column(Modifier.height(220.dp).verticalScroll(rememberScrollState())) {
+                rows.forEach { (k, v) ->
+                    Row(
+                        Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Text(k, color = colors.primary, fontSize = GalleryTokens.textBody)
+                        Text(v, color = colors.onSurfaceVariant, fontSize = GalleryTokens.textBody)
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
+    )
 }

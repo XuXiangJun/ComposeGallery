@@ -30,3 +30,5 @@ desktop.ini
 *.exe
 *.msi
 *.zip
+
+.reasonix/

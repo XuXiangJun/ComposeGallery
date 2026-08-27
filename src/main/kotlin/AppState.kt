@@ -6,6 +6,8 @@ import androidx.compose.runtime.setValue
 import java.io.File
 
 class AppState {
+    private var settings = SettingsStore.load()
+
     var folder by mutableStateOf<File?>(null)
 
     /** 当前浏览的压缩包（非 null 表示正在浏览归档内容）。 */
@@ -14,17 +16,27 @@ class AppState {
 
     var images by mutableStateOf<List<ImageItem>>(emptyList())
     var sortMode by mutableStateOf(SortMode.NAME)
+    var sortDirection by mutableStateOf(settings.sortDirection)
     var recursive by mutableStateOf(false)
     var thumbSize by mutableStateOf(180f)
     var loading by mutableStateOf(false)
+
+    /** 文件名搜索过滤词（空 = 显示全部）。 */
+    var searchQuery by mutableStateOf("")
 
     /** Index into [images]; -1 means grid mode, >= 0 means the viewer is open. */
     var selectedIndex by mutableStateOf(-1)
 
     var slideshow by mutableStateOf(false)
-    var slideshowSeconds by mutableStateOf(3f)
+    var slideshowSeconds by mutableStateOf(settings.slideshowSeconds)
     var showInfo by mutableStateOf(false)
     var showUi by mutableStateOf(true)
+
+    var themeMode by mutableStateOf(settings.themeMode)
+    var showHelp by mutableStateOf(false)
+
+    // ---- 最近打开 ----
+    var recent by mutableStateOf(settings.recent)
 
     // ---- 书架 ----
     var books by mutableStateOf<List<BookEntry>>(emptyList())
@@ -65,6 +77,40 @@ class AppState {
         archiveReader?.close()
         archiveReader = null
         archive = null
+    }
+
+    // ---- 设置 ----
+
+    private fun persistSettings() {
+        settings = settings.copy(
+            themeMode = themeMode,
+            sortDirection = sortDirection,
+            slideshowSeconds = slideshowSeconds,
+            recent = recent,
+        )
+        SettingsStore.save(settings)
+    }
+
+    fun updateThemeMode(mode: ThemeMode) {
+        themeMode = mode
+        persistSettings()
+    }
+
+    fun toggleSortDirection() {
+        sortDirection = if (sortDirection == SortDirection.ASC) SortDirection.DESC else SortDirection.ASC
+        persistSettings()
+    }
+
+    fun updateSlideshowSeconds(value: Float) {
+        slideshowSeconds = value.coerceIn(1f, 10f)
+        persistSettings()
+    }
+
+    /** 打开某个位置后记录到「最近打开」，最多保留 8 条、按使用时间去重。 */
+    fun addRecent(path: String, name: String, type: String) {
+        val entry = RecentEntry(path, name, type, System.currentTimeMillis())
+        recent = (listOf(entry) + recent.filter { it.path != path }).take(8)
+        persistSettings()
     }
 
     // ---- 书架操作 ----

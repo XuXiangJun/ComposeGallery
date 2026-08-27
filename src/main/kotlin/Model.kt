@@ -69,8 +69,11 @@ fun formatBytes(bytes: Long): String {
     return "%.2f GB".format(mb / 1024.0)
 }
 
-fun sortImages(list: List<ImageItem>, mode: SortMode): List<ImageItem> = when (mode) {
-    SortMode.NAME -> list.sortedBy { it.name.lowercase() }
-    SortMode.DATE -> list.sortedByDescending { it.modified }
-    SortMode.SIZE -> list.sortedByDescending { it.sizeBytes }
+fun sortImages(list: List<ImageItem>, mode: SortMode, direction: SortDirection): List<ImageItem> {
+    val base = when (mode) {
+        SortMode.NAME -> list.sortedBy { it.name.lowercase() }
+        SortMode.DATE -> list.sortedBy { it.modified }
+        SortMode.SIZE -> list.sortedBy { it.sizeBytes }
+    }
+    return if (direction == SortDirection.DESC) base.reversed() else base
 }
