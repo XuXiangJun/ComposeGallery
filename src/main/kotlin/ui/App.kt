@@ -17,6 +17,7 @@ import androidx.compose.material.AlertDialog
 import androidx.compose.material.Text
 import androidx.compose.material.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -41,6 +42,9 @@ import gallery.ImageItem
 import gallery.ImageScanner
 import gallery.RecentEntry
 import gallery.ThemeMode
+import gallery.i18n.LocalStrings
+import gallery.i18n.Strings
+import gallery.i18n.StringsKey
 import gallery.moveToTrash
 import gallery.pickArchive
 import gallery.pickFolder
@@ -55,6 +59,9 @@ fun App(state: AppState, onToggleFullscreen: () -> Unit) {
     val focusRequester = remember { FocusRequester() }
     var pendingDelete by remember { mutableStateOf<ImageItem?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
+
+    val strings = remember(state.localeTag) { Strings(state.localeTag) }
+    CompositionLocalProvider(LocalStrings provides strings) {
 
     val isDark = when (state.themeMode) {
         ThemeMode.SYSTEM -> isSystemInDarkTheme()
@@ -93,7 +100,7 @@ fun App(state: AppState, onToggleFullscreen: () -> Unit) {
             state.images = sortImages(items, state.sortMode, state.sortDirection)
             finishLoad()
         } catch (t: Throwable) {
-            error = "刷新失败：${t.message ?: t.toString()}"
+            error = strings.t(StringsKey.RefreshFailed, t.message ?: t.toString())
         } finally {
             state.loading = false
         }
@@ -119,13 +126,13 @@ fun App(state: AppState, onToggleFullscreen: () -> Unit) {
             val reader = try {
                 ArchiveReader.open(f)
             } catch (t: Throwable) {
-                error = "无法打开压缩包：${t.message ?: t.toString()}"
+                error = strings.t(StringsKey.OpenArchiveFailed, t.message ?: t.toString())
                 return@launch
             }
             val items = ImageScanner.scanArchive(f, reader)
             if (items.isEmpty()) {
                 reader.close()
-                error = "压缩包内没有找到图片"
+                error = StringsKey.ArchiveEmpty.zh
                 return@launch
             }
             state.archiveReader?.close()
@@ -152,13 +159,13 @@ fun App(state: AppState, onToggleFullscreen: () -> Unit) {
                 val reader = try {
                     ArchiveReader.open(f)
                 } catch (t: Throwable) {
-                    error = "无法打开压缩包：${t.message ?: t.toString()}"
+                    error = strings.t(StringsKey.OpenArchiveFailed, t.message ?: t.toString())
                     return@launch
                 }
                 val items = ImageScanner.scanArchive(f, reader)
                 if (items.isEmpty()) {
                     reader.close()
-                    error = "压缩包内没有找到图片"
+                    error = StringsKey.ArchiveEmpty.zh
                     return@launch
                 }
                 state.archiveReader = reader
@@ -168,7 +175,7 @@ fun App(state: AppState, onToggleFullscreen: () -> Unit) {
             } else {
                 val f = File(book.path)
                 if (!f.isDirectory) {
-                    error = "文件夹不存在：${f.absolutePath}"
+                    error = strings.t(StringsKey.FolderNotFound, f.absolutePath)
                     return@launch
                 }
                 state.folder = f
@@ -195,13 +202,13 @@ fun App(state: AppState, onToggleFullscreen: () -> Unit) {
                 val reader = try {
                     ArchiveReader.open(f)
                 } catch (t: Throwable) {
-                    error = "无法打开压缩包：${t.message ?: t.toString()}"
+                    error = strings.t(StringsKey.OpenArchiveFailed, t.message ?: t.toString())
                     return@launch
                 }
                 val items = ImageScanner.scanArchive(f, reader)
                 if (items.isEmpty()) {
                     reader.close()
-                    error = "压缩包内没有找到图片"
+                    error = StringsKey.ArchiveEmpty.zh
                     return@launch
                 }
                 state.archiveReader = reader
@@ -211,7 +218,7 @@ fun App(state: AppState, onToggleFullscreen: () -> Unit) {
             } else {
                 val f = File(entry.path)
                 if (!f.isDirectory) {
-                    error = "文件夹不存在：${f.absolutePath}"
+                    error = strings.t(StringsKey.FolderNotFound, f.absolutePath)
                     return@launch
                 }
                 state.folder = f
@@ -376,6 +383,7 @@ fun App(state: AppState, onToggleFullscreen: () -> Unit) {
                     themeMode = state.themeMode,
                     onSetTheme = { state.updateThemeMode(it) },
                     onHelp = { state.showHelp = true },
+                    onLocaleChange = { state.updateLocale(it) },
                     recent = state.recent,
                     onOpenRecent = { openRecent(it) },
                     selectedItem = state.current.takeIf { state.selectedIndex >= 0 },
@@ -386,17 +394,17 @@ fun App(state: AppState, onToggleFullscreen: () -> Unit) {
         pendingDelete?.let { item ->
             AlertDialog(
                 onDismissRequest = { pendingDelete = null },
-                title = { Text("永久删除") },
-                text = { Text("无法移入回收站，是否永久删除「${item.name}」？此操作不可撤销。") },
+                title = { Text(strings.t(StringsKey.ConfirmDeleteTitle)) },
+                text = { Text(strings.t(StringsKey.ConfirmDeleteText, item.name)) },
                 confirmButton = {
                     TextButton(onClick = {
                         item.file?.delete()
                         removeItem(item)
                         pendingDelete = null
-                    }) { Text("删除") }
+                    }) { Text(strings.t(StringsKey.DeleteConfirm)) }
                 },
                 dismissButton = {
-                    TextButton(onClick = { pendingDelete = null }) { Text("取消") }
+                    TextButton(onClick = { pendingDelete = null }) { Text(strings.t(StringsKey.Cancel)) }
                 },
             )
         }
@@ -404,10 +412,10 @@ fun App(state: AppState, onToggleFullscreen: () -> Unit) {
         error?.let { msg ->
             AlertDialog(
                 onDismissRequest = { error = null },
-                title = { Text("提示") },
+                title = { Text(strings.t(StringsKey.AlertTitle)) },
                 text = { Text(msg) },
                 confirmButton = {
-                    TextButton(onClick = { error = null }) { Text("确定") }
+                    TextButton(onClick = { error = null }) { Text(strings.t(StringsKey.OK)) }
                 },
             )
         }
@@ -416,25 +424,27 @@ fun App(state: AppState, onToggleFullscreen: () -> Unit) {
             HelpDialog(onDismiss = { state.showHelp = false })
         }
     }
+    }
 }
 
 @Composable
 private fun HelpDialog(onDismiss: () -> Unit) {
+    val strings = LocalStrings.current
     val colors = LocalGalleryColors.current
     val rows = listOf(
-        "Ctrl + O" to "打开文件夹",
-        "F5" to "刷新当前图集",
-        "F11" to "切换全屏",
-        "F1" to "显示本帮助",
-        "← / →" to "上一张 / 下一张",
-        "Esc" to "关闭大图",
-        "Delete" to "删除当前图片（优先移入回收站）",
-        "I" to "显示 / 隐藏图片信息",
-        "空格" to "开始 / 停止幻灯片",
+        StringsKey.HelpOpenFolder to StringsKey.HelpOpenFolderDesc,
+        StringsKey.HelpRefresh to StringsKey.HelpRefreshDesc,
+        StringsKey.HelpFullscreen to StringsKey.HelpFullscreenDesc,
+        StringsKey.HelpHelp to StringsKey.HelpHelpDesc,
+        StringsKey.HelpPrevNext to StringsKey.HelpPrevNextDesc,
+        StringsKey.HelpClose to StringsKey.HelpCloseDesc,
+        StringsKey.HelpDelete to StringsKey.HelpDeleteDesc,
+        StringsKey.HelpInfo to StringsKey.HelpInfoDesc,
+        StringsKey.HelpSlideshow to StringsKey.HelpSlideshowDesc,
     )
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("快捷键") },
+        title = { Text(strings.t(StringsKey.ShortcutsTitle)) },
         text = {
             Column(Modifier.height(220.dp).verticalScroll(rememberScrollState())) {
                 rows.forEach { (k, v) ->
@@ -442,12 +452,12 @@ private fun HelpDialog(onDismiss: () -> Unit) {
                         Modifier.fillMaxWidth().padding(vertical = 4.dp),
                         horizontalArrangement = Arrangement.SpaceBetween,
                     ) {
-                        Text(k, color = colors.primary, fontSize = GalleryTokens.textBody)
-                        Text(v, color = colors.onSurfaceVariant, fontSize = GalleryTokens.textBody)
+                        Text(strings.t(k), color = colors.primary, fontSize = GalleryTokens.textBody)
+                        Text(strings.t(v), color = colors.onSurfaceVariant, fontSize = GalleryTokens.textBody)
                     }
                 }
             }
         },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
+        confirmButton = { TextButton(onClick = onDismiss) { Text(strings.t(StringsKey.Close)) } },
     )
 }

@@ -5,6 +5,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -23,7 +24,6 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.Checkbox
 import androidx.compose.material.DropdownMenu
@@ -37,10 +37,10 @@ import androidx.compose.material.Text
 import androidx.compose.material.TextButton
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
-import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
@@ -68,6 +68,8 @@ import gallery.RecentEntry
 import gallery.SortDirection
 import gallery.SortMode
 import gallery.ThemeMode
+import gallery.i18n.LocalStrings
+import gallery.i18n.StringsKey
 import kotlin.math.roundToInt
 
 @Composable
@@ -96,10 +98,12 @@ fun GalleryScreen(
     themeMode: ThemeMode,
     onSetTheme: (ThemeMode) -> Unit,
     onHelp: () -> Unit,
+    onLocaleChange: (String) -> Unit,
     recent: List<RecentEntry>,
     onOpenRecent: (RecentEntry) -> Unit,
     selectedItem: ImageItem? = null,
 ) {
+    val s = LocalStrings.current
     val query = searchQuery.trim()
     val visible = if (query.isEmpty()) images else images.filter { it.name.contains(query, ignoreCase = true) }
 
@@ -133,6 +137,7 @@ fun GalleryScreen(
             themeMode = themeMode,
             onSetTheme = onSetTheme,
             onHelp = onHelp,
+            onLocaleChange = onLocaleChange,
         )
         if (loading) {
             LinearProgressIndicator(Modifier.fillMaxWidth())
@@ -193,34 +198,37 @@ private fun Toolbar(
     themeMode: ThemeMode,
     onSetTheme: (ThemeMode) -> Unit,
     onHelp: () -> Unit,
+    onLocaleChange: (String) -> Unit,
 ) {
+    val s = LocalStrings.current
     val colors = LocalGalleryColors.current
     var moreExpanded by remember { mutableStateOf(false) }
+    var localeExpanded by remember { mutableStateOf(false) }
     Surface(elevation = 4.dp) {
         Row(
             Modifier.fillMaxWidth().padding(horizontal = GalleryTokens.spacingM, vertical = GalleryTokens.spacingS),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(GalleryTokens.spacingS),
         ) {
-            TextButton(onClick = onOpenFolder) { Text("打开文件夹") }
-            TextButton(onClick = onOpenArchive) { Text("打开压缩包") }
+            TextButton(onClick = onOpenFolder) { Text(s.t(StringsKey.OpenFolder)) }
+            TextButton(onClick = onOpenArchive) { Text(s.t(StringsKey.OpenArchive)) }
             IconButton(onClick = onRefresh) {
-                Icon(Icons.Filled.Refresh, "刷新", tint = colors.onSurface)
+                Icon(Icons.Filled.Refresh, s.t(StringsKey.Refresh), tint = colors.onSurface)
             }
-            TextButton(onClick = onOpenBookshelf) { Text("书架") }
+            TextButton(onClick = onOpenBookshelf) { Text(s.t(StringsKey.Bookshelf)) }
             Spacer(Modifier.width(GalleryTokens.spacingS))
             SearchField(searchQuery, onSearchChange, modifier = Modifier.width(220.dp))
             if (total > 0) {
                 TextButton(onClick = onSlideshow) {
                     Icon(Icons.Filled.PlayArrow, null, modifier = Modifier.size(18.dp))
-                    Text("幻灯片")
+                    Text(s.t(StringsKey.Slideshow))
                 }
             }
             Spacer(Modifier.weight(1f))
             Text(
-                text = if (folderName == null) "$total 张"
-                else if (searching) "$visibleCount / $total 张"
-                else "$folderName · $total 张",
+                text = if (folderName == null) s.t(StringsKey.StatusTotal, total)
+                else if (searching) s.t(StringsKey.StatusSearching, visibleCount, total)
+                else s.t(StringsKey.StatusWithFolder, folderName, total),
                 fontSize = GalleryTokens.textSmall,
                 color = colors.onSurfaceMuted,
                 maxLines = 1,
@@ -228,21 +236,21 @@ private fun Toolbar(
             )
             Box {
                 IconButton(onClick = { moreExpanded = true }) {
-                    Icon(Icons.Filled.MoreVert, "更多", tint = colors.onSurface)
+                    Icon(Icons.Filled.MoreVert, s.t(StringsKey.More), tint = colors.onSurface)
                 }
                 DropdownMenu(expanded = moreExpanded, onDismissRequest = { moreExpanded = false }) {
                     DropdownMenuItem(onClick = { onRecursiveChange(!recursive); moreExpanded = false }) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Checkbox(checked = recursive, onCheckedChange = null)
                             Spacer(Modifier.width(GalleryTokens.spacingS))
-                            Text(if (recursive) "含子文件夹 ✓" else "含子文件夹")
+                            Text(s.t(if (recursive) StringsKey.RecursiveOn else StringsKey.RecursiveOff))
                         }
                     }
                     if (total > 0 && !isInBookshelf) {
                         DropdownMenuItem(onClick = { onAddToBookshelf(); moreExpanded = false }) {
                             Icon(Icons.Filled.Star, null, tint = colors.primary, modifier = Modifier.size(18.dp))
                             Spacer(Modifier.width(GalleryTokens.spacingS))
-                            Text("加入书架")
+                            Text(s.t(StringsKey.AddToBookshelf))
                         }
                     }
                     var sortSubExpanded by remember { mutableStateOf(false) }
@@ -255,7 +263,7 @@ private fun Toolbar(
                                 tint = colors.onSurface,
                             )
                             Spacer(Modifier.width(GalleryTokens.spacingS))
-                            Text("排序")
+                            Text(s.t(StringsKey.Sort))
                             Spacer(Modifier.weight(1f))
                             Text(
                                 text = "▸",
@@ -279,7 +287,7 @@ private fun Toolbar(
                                     modifier = Modifier.size(18.dp),
                                 )
                                 Spacer(Modifier.width(GalleryTokens.spacingS))
-                                Text(if (sortDirection == SortDirection.ASC) "升序" else "降序")
+                                Text(s.t(if (sortDirection == SortDirection.ASC) StringsKey.SortAsc else StringsKey.SortDesc))
                             }
                             DropdownMenuItem(onClick = {
                                 onSortChange(SortMode.NAME)
@@ -298,7 +306,7 @@ private fun Toolbar(
                                         Spacer(Modifier.size(18.dp))
                                     }
                                     Spacer(Modifier.width(GalleryTokens.spacingS))
-                                    Text("按名称排序")
+                                    Text(s.t(StringsKey.SortName))
                                 }
                             }
                             DropdownMenuItem(onClick = {
@@ -318,7 +326,7 @@ private fun Toolbar(
                                         Spacer(Modifier.size(18.dp))
                                     }
                                     Spacer(Modifier.width(GalleryTokens.spacingS))
-                                    Text("按大小排序")
+                                    Text(s.t(StringsKey.SortSize))
                                 }
                             }
                             DropdownMenuItem(onClick = {
@@ -338,7 +346,7 @@ private fun Toolbar(
                                         Spacer(Modifier.size(18.dp))
                                     }
                                     Spacer(Modifier.width(GalleryTokens.spacingS))
-                                    Text("按修改时间排序")
+                                    Text(s.t(StringsKey.SortDate))
                                 }
                             }
                         }
@@ -346,7 +354,7 @@ private fun Toolbar(
                     var themeSubExpanded by remember { mutableStateOf(false) }
                     Box {
                         DropdownMenuItem(onClick = { themeSubExpanded = true }) {
-                            Text("主题")
+                            Text(s.t(StringsKey.Theme))
                             Spacer(Modifier.weight(1f))
                             Text(
                                 text = "▸",
@@ -376,14 +384,39 @@ private fun Toolbar(
                                             Spacer(Modifier.size(18.dp))
                                         }
                                         Spacer(Modifier.width(GalleryTokens.spacingS))
-                                        Text(mode.label)
+                                        Text(s.t(StringsKey.valueOf(mode.name)))
                                     }
                                 }
                             }
                         }
                     }
                     DropdownMenuItem(onClick = { onHelp(); moreExpanded = false }) {
-                        Text("帮助")
+                        Text(s.t(StringsKey.Help))
+                    }
+                    DropdownMenuItem(onClick = {
+                        localeExpanded = true
+                    }) {
+                        Text(s.t(StringsKey.Language))
+                        Spacer(Modifier.weight(1f))
+                        Text(
+                            text = "▸",
+                            color = colors.onSurfaceMuted,
+                            fontSize = 16.sp,
+                        )
+                    }
+                    DropdownMenu(
+                        expanded = localeExpanded,
+                        onDismissRequest = { localeExpanded = false },
+                    ) {
+                        listOf("zh" to s.t(StringsKey.LocaleZH), "en" to s.t(StringsKey.LocaleEN)).forEach { (tag, label) ->
+                            DropdownMenuItem(onClick = {
+                                onLocaleChange(tag)
+                                localeExpanded = false
+                                moreExpanded = false
+                            }) {
+                                Text(label)
+                            }
+                        }
                     }
                 }
             }
@@ -397,6 +430,7 @@ private fun SearchField(
     onValueChange: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val s = LocalStrings.current
     val colors = LocalGalleryColors.current
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
@@ -413,7 +447,7 @@ private fun SearchField(
             Modifier.padding(horizontal = GalleryTokens.spacingS),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Icon(Icons.Filled.Search, "搜索", tint = colors.onSurfaceMuted, modifier = Modifier.size(18.dp))
+            Icon(Icons.Filled.Search, s.t(StringsKey.Search), tint = colors.onSurfaceMuted, modifier = Modifier.size(18.dp))
             Box(Modifier.weight(1f).padding(horizontal = GalleryTokens.spacingS)) {
                 BasicTextField(
                     value = value,
@@ -423,11 +457,11 @@ private fun SearchField(
                     cursorBrush = SolidColor(colors.primary),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .semantics { contentDescription = "搜索图片" },
+                        .semantics { contentDescription = s.t(StringsKey.SearchA11y) },
                     interactionSource = interaction,
                     decorationBox = { inner ->
                         if (value.isEmpty()) {
-                            Text("搜索图片…", color = colors.onSurfaceMuted, fontSize = GalleryTokens.textBody)
+                            Text(s.t(StringsKey.SearchHint), color = colors.onSurfaceMuted, fontSize = GalleryTokens.textBody)
                         }
                         inner()
                     },
@@ -438,7 +472,7 @@ private fun SearchField(
                     onClick = { onValueChange("") },
                     modifier = Modifier.size(24.dp),
                 ) {
-                    Icon(Icons.Filled.Close, "清除搜索", tint = colors.onSurfaceMuted, modifier = Modifier.size(16.dp))
+                    Icon(Icons.Filled.Close, s.t(StringsKey.ClearSearch), tint = colors.onSurfaceMuted, modifier = Modifier.size(16.dp))
                 }
             }
         }
@@ -447,16 +481,17 @@ private fun SearchField(
 
 @Composable
 private fun SortMenu(sortMode: SortMode, onSortChange: (SortMode) -> Unit) {
+    val s = LocalStrings.current
     var expanded by remember { mutableStateOf(false) }
     Box {
         TextButton(onClick = { expanded = true }) {
-            Text("排序: ${sortMode.label}")
+            Text(s.t(StringsKey.valueOf(sortMode.name)))
             Icon(Icons.Filled.ArrowDropDown, null)
         }
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
             SortMode.entries.forEach { m ->
                 DropdownMenuItem(onClick = { onSortChange(m); expanded = false }) {
-                    Text(m.label, color = if (m == sortMode) LocalGalleryColors.current.primary else LocalGalleryColors.current.onSurface)
+                    Text(s.t(StringsKey.valueOf(m.name)), color = if (m == sortMode) LocalGalleryColors.current.primary else LocalGalleryColors.current.onSurface)
                 }
             }
         }
@@ -465,17 +500,18 @@ private fun SortMenu(sortMode: SortMode, onSortChange: (SortMode) -> Unit) {
 
 @Composable
 private fun ThemeMenu(themeMode: ThemeMode, onSetTheme: (ThemeMode) -> Unit) {
+    val s = LocalStrings.current
     var expanded by remember { mutableStateOf(false) }
     val colors = LocalGalleryColors.current
     Box {
         TextButton(onClick = { expanded = true }) {
-            Text(themeMode.label)
+            Text(s.t(StringsKey.valueOf(themeMode.name)))
             Icon(Icons.Filled.ArrowDropDown, null)
         }
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
             ThemeMode.entries.forEach { m ->
                 DropdownMenuItem(onClick = { onSetTheme(m); expanded = false }) {
-                    Text(m.label, color = if (m == themeMode) colors.primary else colors.onSurface)
+                    Text(s.t(StringsKey.valueOf(m.name)), color = if (themeMode == m) colors.primary else colors.onSurface)
                 }
             }
         }
@@ -491,24 +527,25 @@ private fun EmptyState(
     onOpenRecent: (RecentEntry) -> Unit,
     onOpenFolder: () -> Unit,
 ) {
+    val s = LocalStrings.current
     val colors = LocalGalleryColors.current
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Text(
                 when {
-                    searching -> "没有匹配「$query」的图片"
-                    folderName == null -> "尚未打开文件夹"
-                    else -> "「$folderName」中没有找到图片"
+                    searching -> s.t(StringsKey.Empty_NoMatch, query)
+                    folderName == null -> s.t(StringsKey.Empty_NoFolder)
+                    else -> s.t(StringsKey.Empty_NoImages, folderName)
                 },
                 color = colors.onSurfaceVariant,
                 fontSize = 16.sp,
             )
             TextButton(onClick = onOpenFolder) {
-                Text("选择图片文件夹")
+                Text(s.t(StringsKey.SelectFolder))
             }
             if (!searching && folderName == null && recent.isNotEmpty()) {
                 Spacer(Modifier.height(GalleryTokens.spacingXl))
-                Text("最近打开", color = colors.onSurfaceMuted, fontSize = GalleryTokens.textSmall)
+                Text(s.t(StringsKey.Recent), color = colors.onSurfaceMuted, fontSize = GalleryTokens.textSmall)
                 Spacer(Modifier.height(GalleryTokens.spacingS))
                 recent.take(6).forEach { entry ->
                     Row(

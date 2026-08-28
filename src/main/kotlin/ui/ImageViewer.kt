@@ -79,6 +79,8 @@ import gallery.ImageLoader
 import gallery.LoadedImage
 import gallery.formatBytes
 import gallery.openInFileManager
+import gallery.i18n.LocalStrings
+import gallery.i18n.StringsKey
 import java.text.SimpleDateFormat
 import java.util.Date
 import kotlinx.coroutines.isActive
@@ -157,13 +159,14 @@ fun ImageViewer(
             },
     ) {
         val li = loadedImage
+        val s = LocalStrings.current
         when {
             li == null -> {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         CircularProgressIndicator(color = Accent)
                         Spacer(Modifier.height(8.dp))
-                        Text("加载中…", color = ViewerMuted, fontSize = 13.sp)
+                        Text(s.t(StringsKey.Loading), color = ViewerMuted, fontSize = 13.sp)
                     }
                 }
             }
@@ -180,7 +183,7 @@ fun ImageViewer(
                 val frames = li.animation.frames
                 if (frames.isEmpty()) {
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Text("无法解码此动画", color = ViewerMuted)
+                        Text(s.t(StringsKey.LoadAnimationFailed), color = ViewerMuted)
                     }
                 } else {
                     var frameIndex by remember(li.animation) { mutableStateOf(0) }
@@ -249,6 +252,7 @@ private fun BoxScope.ViewerTopBar(
     onToggleInfo: () -> Unit,
     onClose: () -> Unit,
 ) {
+    val s = LocalStrings.current
     Row(
         Modifier.align(Alignment.TopCenter).fillMaxWidth()
             .background(ViewerScrim)
@@ -265,13 +269,13 @@ private fun BoxScope.ViewerTopBar(
         )
         Text("${index + 1} / $total", color = ViewerSubtle, fontSize = 13.sp)
         IconButton(onClick = onToggleSlideshow) {
-            Icon(Icons.Filled.PlayArrow, "幻灯片", tint = if (slideshow) Accent else ViewerIcon)
+            Icon(Icons.Filled.PlayArrow, s.t(StringsKey.SlideShow), tint = if (slideshow) Accent else ViewerIcon)
         }
         IconButton(onClick = onToggleInfo) {
-            Icon(Icons.Filled.Info, "信息", tint = ViewerIcon)
+            Icon(Icons.Filled.Info, s.t(StringsKey.Info), tint = ViewerIcon)
         }
         IconButton(onClick = onClose) {
-            Icon(Icons.Filled.Close, "关闭", tint = ViewerIcon)
+            Icon(Icons.Filled.Close, s.t(StringsKey.Close), tint = ViewerIcon)
         }
     }
 }
@@ -290,6 +294,7 @@ private fun BoxScope.ViewerBottomBar(
     slideshowSeconds: Float,
     onSlideshowSecondsChange: (Float) -> Unit,
 ) {
+    val s = LocalStrings.current
     Row(
         Modifier.align(Alignment.BottomCenter).fillMaxWidth()
             .background(ViewerScrim)
@@ -298,19 +303,19 @@ private fun BoxScope.ViewerBottomBar(
         horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         IconButton(onClick = onPrev) {
-            Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, "上一张", tint = ViewerIcon)
+            Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, s.t(StringsKey.Prev), tint = ViewerIcon)
         }
         IconButton(onClick = onNext) {
-            Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, "下一张", tint = ViewerIcon)
+            Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, s.t(StringsKey.Next), tint = ViewerIcon)
         }
         Spacer(Modifier.width(8.dp))
-        TextButton(onClick = onFit) { Text("适应", color = ViewerIcon) }
-        TextButton(onClick = onActual) { Text("1:1", color = ViewerIcon) }
+        TextButton(onClick = onFit) { Text(s.t(StringsKey.Fit), color = ViewerIcon) }
+        TextButton(onClick = onActual) { Text(s.t(StringsKey.Actual), color = ViewerIcon) }
         TextButton(onClick = onZoomOut) { Text("−", color = ViewerIcon, fontSize = 16.sp) }
         TextButton(onClick = onZoomIn) { Text("+", color = ViewerIcon, fontSize = 16.sp) }
         Spacer(Modifier.weight(1f))
         IconButton(onClick = onOpenInFolder) {
-            Icon(Icons.Filled.Search, "在文件夹中显示", tint = ViewerIcon)
+            Icon(Icons.Filled.Search, s.t(StringsKey.OpenInFolder), tint = ViewerIcon)
         }
         Slider(
             value = slideshowSeconds,
@@ -318,15 +323,16 @@ private fun BoxScope.ViewerBottomBar(
             valueRange = 1f..10f,
             modifier = Modifier.width(90.dp),
         )
-        Text("间隔 ${slideshowSeconds.toInt()}s", color = ViewerIcon, fontSize = 12.sp)
+        Text(s.t(StringsKey.Interval, slideshowSeconds.toInt()), color = ViewerIcon, fontSize = 12.sp)
         IconButton(onClick = onDelete, enabled = canDelete) {
-            Icon(Icons.Filled.Delete, "删除", tint = if (canDelete) ViewerIcon else ViewerDim)
+            Icon(Icons.Filled.Delete, s.t(StringsKey.Delete), tint = if (canDelete) ViewerIcon else ViewerDim)
         }
     }
 }
 
 @Composable
 private fun BoxScope.InfoPanel(item: ImageItem, loadedImage: LoadedImage?) {
+    val s = LocalStrings.current
     Surface(
         Modifier.align(Alignment.CenterEnd).width(300.dp).fillMaxHeight(),
         color = ViewerPanelScrim,
@@ -335,13 +341,13 @@ private fun BoxScope.InfoPanel(item: ImageItem, loadedImage: LoadedImage?) {
             Modifier.padding(16.dp).verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Text("文件信息", color = Accent, fontSize = 14.sp)
-            InfoRow("名称", item.name)
-            InfoRow("尺寸", "${loadedImage?.width ?: 0} × ${loadedImage?.height ?: 0} px")
-            InfoRow("大小", formatBytes(item.sizeBytes))
-            InfoRow("路径", item.displayPath)
+            Text(s.t(StringsKey.FileInfo), color = Accent, fontSize = 14.sp)
+            InfoRow(s.t(StringsKey.InfoName), item.name)
+            InfoRow(s.t(StringsKey.InfoDimensions), "${loadedImage?.width ?: 0} × ${loadedImage?.height ?: 0} px")
+            InfoRow(s.t(StringsKey.InfoFileSize), formatBytes(item.sizeBytes))
+            InfoRow(s.t(StringsKey.InfoPath), item.displayPath)
             InfoRow(
-                "修改时间",
+                s.t(StringsKey.InfoModified),
                 SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(Date(item.modified)),
             )
         }
@@ -350,6 +356,7 @@ private fun BoxScope.InfoPanel(item: ImageItem, loadedImage: LoadedImage?) {
 
 @Composable
 private fun InfoRow(label: String, value: String) {
+    val s = LocalStrings.current
     Column {
         Text(label, color = ViewerCaption, fontSize = 11.sp)
         Text(

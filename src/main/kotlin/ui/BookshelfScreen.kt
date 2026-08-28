@@ -45,6 +45,8 @@ import gallery.ArchiveSource
 import gallery.BookEntry
 import gallery.FileSource
 import gallery.ImageSource
+import gallery.i18n.LocalStrings
+import gallery.i18n.StringsKey
 import java.io.File
 import kotlin.math.roundToInt
 
@@ -56,6 +58,7 @@ fun BookshelfScreen(
     onBack: () -> Unit,
 ) {
     val colors = LocalGalleryColors.current
+    val s = LocalStrings.current
 
     // 压缩包 reader 共享缓存：本次进入书架期间复用，离开书架时统一关闭。
     val readerCache = remember {
@@ -86,12 +89,12 @@ fun BookshelfScreen(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 IconButton(onClick = onBack) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回", tint = colors.onSurfaceVariant)
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, s.t(StringsKey.Back), tint = colors.onSurfaceVariant)
                 }
-                Text("书架", color = colors.onSurface, fontSize = GalleryTokens.textHeadline)
+                Text(s.t(StringsKey.BookshelfTitle), color = colors.onSurface, fontSize = GalleryTokens.textHeadline)
                 Spacer(Modifier.weight(1f))
                 Text(
-                    "共 ${books.size} 本",
+                    s.t(StringsKey.BookshelfTotal, books.size),
                     color = colors.onSurfaceVariant,
                     fontSize = GalleryTokens.textSmall,
                 )
@@ -101,7 +104,7 @@ fun BookshelfScreen(
         if (books.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Text(
-                    "书架是空的\n在图库中打开文件夹或压缩包后，点击「加入书架」即可收藏",
+                    s.t(StringsKey.BookshelfEmpty),
                     color = colors.onSurfaceVariant,
                     fontSize = GalleryTokens.textBase,
                     lineHeight = 22.sp,
@@ -136,6 +139,7 @@ private fun BookCard(
     onRemove: () -> Unit,
 ) {
     val colors = LocalGalleryColors.current
+    val s = LocalStrings.current
     val density = LocalDensity.current
     val targetPx = (200 * density.density).roundToInt().coerceIn(200, 512)
     val interaction = remember { MutableInteractionSource() }
@@ -161,7 +165,7 @@ private fun BookCard(
                     .size(28.dp)
                     .background(Color(0x88000000), GalleryTokens.shapeS),
             ) {
-                Icon(Icons.Filled.Close, "移出书架", tint = Color.White, modifier = Modifier.size(16.dp))
+                Icon(Icons.Filled.Close, s.t(StringsKey.RemoveBook), tint = Color.White, modifier = Modifier.size(16.dp))
             }
         }
         Column(Modifier.padding(horizontal = GalleryTokens.spacingS, vertical = GalleryTokens.spacingS)) {

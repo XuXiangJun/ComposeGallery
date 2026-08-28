@@ -35,6 +35,8 @@ class AppState {
     var themeMode by mutableStateOf(settings.themeMode)
     var showHelp by mutableStateOf(false)
 
+    var localeTag by mutableStateOf(settings.localeTag())
+
     // ---- 最近打开 ----
     var recent by mutableStateOf(settings.recent)
 
@@ -87,8 +89,14 @@ class AppState {
             sortDirection = sortDirection,
             slideshowSeconds = slideshowSeconds,
             recent = recent,
+            locale = AppLocale.valueOf(localeTag.uppercase()),
         )
         SettingsStore.save(settings)
+    }
+
+    fun updateLocale(tag: String) {
+        localeTag = tag
+        persistSettings()
     }
 
     fun updateThemeMode(mode: ThemeMode) {
