@@ -92,11 +92,27 @@ private val infoDateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss")
  */
 private val ViewerBarInset = 56.dp
 
+/**
+ * 查看器的缩放 / 平移状态。
+ *
+ * 视口尺寸与「基础绘制尺寸」也放在这里，而不是让事件回调去捕获组合期的局部变量：
+ * 滚轮 / 手势回调注册在 pointerInput 上，key 不变时那个协程不会重启，
+ * 回调里捕获的局部值会一直是**首次组合**时的旧值（渲染却用最新值），
+ * 缩放锚点一旦算错就会「越滚越偏」。放进对象字段则永远是当前值。
+ */
 class ZoomState {
     var scale by mutableStateOf(1f)
     var offsetX by mutableStateOf(0f)
     var offsetY by mutableStateOf(0f)
     var fit by mutableStateOf(1f)
+
+    /** 视口（画布）尺寸，由布局阶段写入。 */
+    var viewportW by mutableStateOf(0f)
+    var viewportH by mutableStateOf(0f)
+
+    /** 基础绘制尺寸 = bitmap 尺寸 × fit，由布局阶段写入。 */
+    var baseW by mutableStateOf(0f)
+    var baseH by mutableStateOf(0f)
 
     fun reset() {
         scale = 1f
@@ -104,12 +120,37 @@ class ZoomState {
         offsetY = 0f
     }
 
+    /** 当前 [s] 缩放下图片左上角在视口中的位置。 */
+    private fun imageLeft(s: Float): Float = (viewportW - baseW * s) / 2f + offsetX
+    private fun imageTop(s: Float): Float = (viewportH - baseH * s) / 2f + offsetY
+
+    /** 以 [focal]（视口坐标）为锚点缩放：该点下的图片内容保持不动。 */
+    fun zoomAt(factor: Float, focal: Offset) {
+        if (baseW <= 0f || baseH <= 0f || viewportW <= 0f || viewportH <= 0f) return
+        val oldScale = scale
+        val newScale = (oldScale * factor).coerceIn(0.02f, 64f)
+        if (newScale == oldScale) return
+        val k = newScale / oldScale
+        val left = imageLeft(oldScale)
+        val top = imageTop(oldScale)
+        offsetX = (focal.x - (focal.x - left) * k) - (viewportW - baseW * newScale) / 2f
+        offsetY = (focal.y - (focal.y - top) * k) - (viewportH - baseH * newScale) / 2f
+        scale = newScale
+        clampIfFit()
+    }
+
+    /** 拖拽平移。 */
+    fun panBy(dx: Float, dy: Float) {
+        if (dx == 0f && dy == 0f) return
+        offsetX += dx
+        offsetY += dy
+        clampIfFit()
+    }
+
+    /** 按钮缩放：以视口中心为锚点（所以只改 scale，不动 offset）。 */
     fun zoomBy(factor: Float) {
         scale = (scale * factor).coerceIn(0.02f, 64f)
-        if (scale <= 1f) {
-            offsetX = 0f
-            offsetY = 0f
-        }
+        clampIfFit()
     }
 
     fun to100() {
@@ -117,6 +158,18 @@ class ZoomState {
     }
 
     fun toFit() = reset()
+
+    /** 适应窗口及以下时不该保留平移量。 */
+    private fun clampIfFit() {
+        if (scale <= 1f) {
+            offsetX = 0f
+            offsetY = 0f
+        }
+    }
+
+    /** 视口坐标 [p] 对应的图片像素坐标（相对图片左上角）；用于诊断与测试锚点是否稳定。 */
+    fun imagePointAt(p: Offset): Offset =
+        Offset((p.x - imageLeft(scale)) / scale, (p.y - imageTop(scale)) / scale)
 }
 
 @Composable
@@ -406,29 +459,19 @@ private fun ZoomableImage(
                 1f
             }
         }
-        SideEffect { zoom.fit = fit }
 
-        fun zoomAt(factor: Float, focal: Offset) {
-            val oldScale = zoom.scale
-            val newScale = (oldScale * factor).coerceIn(0.02f, 64f)
-            val k = newScale / oldScale
-            val drawnW = bitmap.width * fit * oldScale
-            val drawnH = bitmap.height * fit * oldScale
-            val imgLeft = (boxW - drawnW) / 2f + zoom.offsetX
-            val imgTop = (boxH - drawnH) / 2f + zoom.offsetY
-            val newDrawnW = bitmap.width * fit * newScale
-            val newDrawnH = bitmap.height * fit * newScale
-            zoom.offsetX = (focal.x - (focal.x - imgLeft) * k) - (boxW - newDrawnW) / 2f
-            zoom.offsetY = (focal.y - (focal.y - imgTop) * k) - (boxH - newDrawnH) / 2f
-            zoom.scale = newScale
-            if (newScale <= 1f) {
-                zoom.offsetX = 0f
-                zoom.offsetY = 0f
-            }
+        // 几何量写给 ZoomState：事件回调读对象字段，永远是当前值。
+        //（若让回调捕获这些局部变量，pointerInput 的协程不重启就会一直用旧值 → 缩放锚点漂移。）
+        SideEffect {
+            zoom.fit = fit
+            zoom.viewportW = boxW
+            zoom.viewportH = boxH
+            zoom.baseW = bitmap.width * fit
+            zoom.baseH = bitmap.height * fit
         }
 
-        val drawnW = bitmap.width * fit * zoom.scale
-        val drawnH = bitmap.height * fit * zoom.scale
+        val drawnW = zoom.baseW * zoom.scale
+        val drawnH = zoom.baseH * zoom.scale
         val imgLeft = (boxW - drawnW) / 2f + zoom.offsetX
         val imgTop = (boxH - drawnH) / 2f + zoom.offsetY
 
@@ -437,22 +480,15 @@ private fun ZoomableImage(
                 .fillMaxSize()
                 .pointerInput(bitmap) {
                     detectTransformGestures { centroid, pan, zoomChange, _ ->
-                        if (zoomChange != 1f) {
-                            zoomAt(zoomChange, centroid)
-                        }
-                        zoom.offsetX += pan.x
-                        zoom.offsetY += pan.y
-                        if (zoom.scale <= 1f) {
-                            zoom.offsetX = 0f
-                            zoom.offsetY = 0f
-                        }
+                        if (zoomChange != 1f) zoom.zoomAt(zoomChange, centroid)
+                        zoom.panBy(pan.x, pan.y)
                     }
                 }
                 .onPointerEvent(PointerEventType.Scroll) { event ->
                     val change = event.changes.first()
                     val dy = change.scrollDelta.y
                     if (dy != 0f) {
-                        zoomAt(if (dy > 0) 1.15f else 1f / 1.15f, change.position)
+                        zoom.zoomAt(if (dy > 0) 1.15f else 1f / 1.15f, change.position)
                     }
                 }
                 .pointerInput(Unit) {

@@ -9,6 +9,7 @@ import java.awt.image.BufferedImage
 import java.io.File
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
+import gallery.ui.ZoomState
 import javax.imageio.ImageIO
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
@@ -91,6 +92,57 @@ class GalleryCoreTest {
     }
 
     private fun item(name: String) = ImageItem(FileSource(File(tmpDir, name)), name, 1024L, 0L)
+
+    /**
+     * 滚轮/手势缩放必须让光标下的内容保持不动。
+     * 这里模拟「同一锚点连续放大」：每放大一次，该锚点对应的图片坐标都不该变
+     *（曾经表现为「越滚越偏」，根因是事件回调用了过期的视口/尺寸）。
+     */
+    @Test
+    fun zoomAtKeepsFocalPointStable() {
+        val zoom = ZoomState()
+        zoom.viewportW = 800f
+        zoom.viewportH = 600f
+        zoom.baseW = 400f // 相当于 400x300 的图、fit = 1
+        zoom.baseH = 300f
+
+        val focal = androidx.compose.ui.geometry.Offset(180f, 140f)
+        val before = zoom.imagePointAt(focal)
+        repeat(6) { zoom.zoomAt(1.15f, focal) }
+        val after = zoom.imagePointAt(focal)
+
+        assertTrue(zoom.scale > 1f, "应当确实放大了")
+        assertEquals(before.x, after.x, 0.01f, "光标下的图片横向坐标应保持不动")
+        assertEquals(before.y, after.y, 0.01f, "光标下的图片纵向坐标应保持不动")
+    }
+
+    /** 一路缩回适应窗口及以下时应回到居中状态，不留平移残量。 */
+    @Test
+    fun zoomAtShrinkReturnsToCenter() {
+        val zoom = ZoomState()
+        zoom.viewportW = 800f
+        zoom.viewportH = 600f
+        zoom.baseW = 400f
+        zoom.baseH = 300f
+
+        val focal = androidx.compose.ui.geometry.Offset(700f, 520f)
+        repeat(4) { zoom.zoomAt(1.15f, focal) }
+        repeat(12) { zoom.zoomAt(1f / 1.15f, focal) }
+
+        assertTrue(zoom.scale <= 1f, "应已缩到适应窗口及以下")
+        assertEquals(0f, zoom.offsetX, "缩回适应窗口后横向偏移应清零")
+        assertEquals(0f, zoom.offsetY, "缩回适应窗口后纵向偏移应清零")
+    }
+
+    /** 布局尚未发生（视口/基础尺寸为 0）时，缩放事件不应改动任何状态。 */
+    @Test
+    fun zoomAtIgnoresEventsBeforeLayout() {
+        val zoom = ZoomState()
+        zoom.zoomAt(1.15f, androidx.compose.ui.geometry.Offset(10f, 10f))
+        assertEquals(1f, zoom.scale)
+        assertEquals(0f, zoom.offsetX)
+        assertEquals(0f, zoom.offsetY)
+    }
 
     /**
      * 造一棵多层目录树（相对目录 -> 文件名），用来验证并行扫描的结果与串行语义一致。
