@@ -105,7 +105,8 @@ fun GalleryScreen(
     val s = LocalStrings.current
     val query = searchQuery.trim()
     // 与 AppState.step 共用同一套过滤规则（trim + 忽略大小写），保证网格显示顺序与查看器翻页顺序一致。
-    val visible = gallery.filterImages(images, query)
+    // 按 (images, query) 缓存过滤结果：避免每次重组都重算一遍全量过滤（上万条时很明显）。
+    val visible = remember(images, query) { gallery.filterImages(images, query) }
 
     Column(
         Modifier

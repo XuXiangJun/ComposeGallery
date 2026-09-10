@@ -8,6 +8,7 @@ import java.io.ByteArrayInputStream
 import javax.imageio.ImageIO
 import javax.imageio.ImageReader
 import javax.imageio.stream.ImageInputStream
+import kotlin.math.sqrt
 import org.jetbrains.skia.ColorAlphaType
 import org.jetbrains.skia.ColorType
 import org.jetbrains.skia.Image
@@ -24,6 +25,12 @@ data class GifAnimation(
 
 object GifDecoder {
     /**
+     * 动画所有帧的像素总预算。帧是全部常驻内存的（不像静态图能只留一张），
+     * 超出预算时自动降低单帧分辨率——宁可模糊一点，也不要 OOM。
+     */
+    private const val MAX_TOTAL_PIXELS = 96L * 1024 * 1024
+
+    /**
      * 解码动画 GIF 为帧列表。[maxDim] 限制单帧最大边长（大图按目标尺寸缩小，
      * 避免全尺寸加载过多内存）。帧直接用像素拷贝转成 Skia ImageBitmap（不经 PNG 中转）。
      */
@@ -39,11 +46,19 @@ object GifDecoder {
                 val height = reader.getHeight(0)
                 val numFrames = reader.getNumImages(true)
 
+                // 单帧尺寸同时受 maxDim 与「总像素预算 / 帧数」两个约束。
+                val limitScale = minOf(1f, maxDim.toFloat() / maxOf(width, height).toFloat())
+                val perFrameBudget = MAX_TOTAL_PIXELS.toDouble() / numFrames.coerceAtLeast(1)
+                val budgetScale = sqrt(perFrameBudget / (width.toDouble() * height.toDouble())).toFloat()
+                val scale = minOf(limitScale, budgetScale).coerceIn(0.01f, 1f)
+                val frameW = maxOf(1, (width * scale).toInt())
+                val frameH = maxOf(1, (height * scale).toInt())
+
                 val frames = ArrayList<ImageBitmap>(numFrames)
                 val delays = ArrayList<Int>(numFrames)
                 for (i in 0 until numFrames) {
                     val image = reader.read(i)
-                    frames.add(bufferedImageToImageBitmap(image, maxDim))
+                    frames.add(bufferedImageToImageBitmap(image, frameW, frameH))
                     delays.add(getDelay(reader.getImageMetadata(i)))
                 }
 
@@ -69,40 +84,36 @@ object GifDecoder {
         0
     }
 
-    /** BufferedImage → 目标尺寸的 Compose ImageBitmap（ARGB → RGBA → makeRaster 拷贝）。 */
-    private fun bufferedImageToImageBitmap(img: BufferedImage, maxDim: Int): ImageBitmap {
+    /**
+     * BufferedImage → 目标尺寸的 Compose ImageBitmap。
+     *
+     * AWT 的 TYPE_INT_ARGB 是「ARGB 打包 int」，在小端机器上它的字节序列正好是 B,G,R,A，
+     * 因此可以直接按 BGRA_8888 交给 Skia，省掉原先逐像素移位拷贝的百万次循环。
+     */
+    private fun bufferedImageToImageBitmap(img: BufferedImage, targetW: Int, targetH: Int): ImageBitmap {
         val iw = img.width
         val ih = img.height
         if (iw == 0 || ih == 0) {
             return emptyBitmap(1, 1)
         }
-        val scale = minOf(1f, maxDim.toFloat() / maxOf(iw, ih).toFloat())
-        val w = maxOf(1, (iw * scale).toInt())
-        val h = maxOf(1, (ih * scale).toInt())
 
-        val scaled = if (w != iw || h != ih) {
-            val s = BufferedImage(w, h, BufferedImage.TYPE_INT_ARGB)
+        val scaled = if (targetW != iw || targetH != ih) {
+            val s = BufferedImage(targetW, targetH, BufferedImage.TYPE_INT_ARGB)
             val g = s.createGraphics()
             g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR)
-            g.drawImage(img, 0, 0, w, h, null)
+            g.drawImage(img, 0, 0, targetW, targetH, null)
             g.dispose()
             s
         } else {
             img
         }
 
-        val argb = scaled.getRGB(0, 0, w, h, null, 0, w)
-        val pixels = ByteArray(w * h * 4)
-        for (i in argb.indices) {
-            val c = argb[i]
-            val idx = i * 4
-            pixels[idx] = ((c ushr 16) and 0xFF).toByte()   // R
-            pixels[idx + 1] = ((c ushr 8) and 0xFF).toByte()  // G
-            pixels[idx + 2] = (c and 0xFF).toByte()          // B
-            pixels[idx + 3] = ((c ushr 24) and 0xFF).toByte() // A
-        }
-        val info = ImageInfo(w, h, ColorType.RGBA_8888, ColorAlphaType.UNPREMUL)
-        val image = Image.makeRaster(info, pixels, info.minRowBytes)
+        val argb = scaled.getRGB(0, 0, targetW, targetH, null, 0, targetW)
+        val buffer = java.nio.ByteBuffer.allocate(targetW * targetH * 4)
+            .order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        buffer.asIntBuffer().put(argb)
+        val info = ImageInfo(targetW, targetH, ColorType.BGRA_8888, ColorAlphaType.UNPREMUL)
+        val image = Image.makeRaster(info, buffer.array(), info.minRowBytes)
         return image.toComposeImageBitmap()
     }
 

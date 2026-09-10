@@ -9,6 +9,9 @@ import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import org.jetbrains.skia.Bitmap
 import org.jetbrains.skia.Canvas
+import org.jetbrains.skia.Codec
+import org.jetbrains.skia.Data
+import org.jetbrains.skia.EncodedOrigin
 import org.jetbrains.skia.Image
 import org.jetbrains.skia.ImageInfo
 import org.jetbrains.skia.Rect
@@ -29,33 +32,100 @@ sealed interface LoadedImage {
     }
 }
 
+/**
+ * 按字节上限维护的 LRU 缓存。
+ *
+ * 图片占的是 native 内存，按条数限制时一旦用户把缩略图尺寸调大（最大 640px）就容易失控，
+ * 所以这里按像素字节数计量。
+ */
+private class ByteLruCache<V>(private val maxBytes: Long, private val sizeOf: (V) -> Long) {
+    private val map = LinkedHashMap<String, V>(64, 0.75f, true)
+    private var bytes = 0L
+
+    @Synchronized
+    fun get(key: String): V? = map[key]
+
+    @Synchronized
+    fun put(key: String, value: V) {
+        map.put(key, value)?.let { bytes -= sizeOf(it) }
+        bytes += sizeOf(value)
+        val it = map.entries.iterator()
+        while (bytes > maxBytes && it.hasNext()) {
+            val eldest = it.next()
+            bytes -= sizeOf(eldest.value)
+            it.remove()
+        }
+    }
+
+    @Synchronized
+    fun clear() {
+        map.clear()
+        bytes = 0
+    }
+}
+
 object ImageLoader {
     private val decodeDispatcher = Dispatchers.IO.limitedParallelism(4)
     private val semaphore = Semaphore(4)
 
-    private val thumbnailCache =
-        object : LinkedHashMap<String, ImageBitmap>(128, 0.75f, true) {
-            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, ImageBitmap>?): Boolean =
-                size > 200
-        }
+    /** 缩略图像素缓存上限（约 96MB）。 */
+    private const val THUMBNAIL_CACHE_BYTES = 96L * 1024 * 1024
+
+    /** 全尺寸图缓存张数：够前后翻页与预取命中，又不至于常驻太多大图。 */
+    private const val FULL_CACHE_ENTRIES = 4
+
+    private val thumbnailCache = ByteLruCache<ImageBitmap>(THUMBNAIL_CACHE_BYTES) { bitmapBytes(it) }
+
+    private val fullCache = object : LinkedHashMap<String, LoadedImage>(8, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, LoadedImage>?): Boolean =
+            size > FULL_CACHE_ENTRIES
+    }
+
+    private fun bitmapBytes(bitmap: ImageBitmap): Long = bitmap.width.toLong() * bitmap.height * 4
 
     fun invalidateCache() {
-        synchronized(thumbnailCache) { thumbnailCache.clear() }
+        thumbnailCache.clear()
+        synchronized(fullCache) { fullCache.clear() }
     }
 
-    suspend fun loadThumbnail(source: ImageSource, targetDim: Int): ImageBitmap? = semaphore.withPermit {
+    suspend fun loadThumbnail(source: ImageSource, targetDim: Int): ImageBitmap? {
         val key = "${source.cacheKey}?$targetDim"
-        synchronized(thumbnailCache) { thumbnailCache[key] }?.let { return@withPermit it }
-        withContext(decodeDispatcher) {
-            runCatching { decodeThumbnail(source.openBytes(), targetDim) }
-                .getOrNull()
-                ?.also { synchronized(thumbnailCache) { thumbnailCache[key] = it } }
+        thumbnailCache.get(key)?.let { return it }
+        // 命中缓存的路径不进信号量，避免无谓排队。
+        return semaphore.withPermit {
+            thumbnailCache.get(key)?.let { return@withPermit it }
+            withContext(decodeDispatcher) {
+                runCatching { decodeThumbnail(source.openBytes(), targetDim) }
+                    .getOrNull()
+                    ?.also { thumbnailCache.put(key, it) }
+            }
         }
     }
 
-    suspend fun loadFull(source: ImageSource, maxDim: Int = 8192): LoadedImage? = semaphore.withPermit {
-        withContext(decodeDispatcher) {
-            runCatching { decodeFull(source.openBytes(), maxDim) }.getOrNull()
+    suspend fun loadFull(source: ImageSource, maxDim: Int = 8192): LoadedImage? {
+        val key = "${source.cacheKey}?$maxDim"
+        synchronized(fullCache) { fullCache[key] }?.let { return it }
+        return semaphore.withPermit {
+            synchronized(fullCache) { fullCache[key] }?.let { return@withPermit it }
+            withContext(decodeDispatcher) {
+                runCatching { decodeFull(source.openBytes(), maxDim) }
+                    .getOrNull()
+                    ?.also { synchronized(fullCache) { fullCache[key] = it } }
+            }
+        }
+    }
+
+    /** 预取相邻图片：结果直接进全尺寸缓存，翻页时命中；失败静默忽略。 */
+    suspend fun prefetch(source: ImageSource, maxDim: Int = 8192) {
+        val key = "${source.cacheKey}?$maxDim"
+        if (synchronized(fullCache) { fullCache[key] } != null) return
+        semaphore.withPermit {
+            if (synchronized(fullCache) { fullCache[key] } != null) return@withPermit
+            withContext(decodeDispatcher) {
+                runCatching { decodeFull(source.openBytes(), maxDim) }
+                    .getOrNull()
+                    ?.also { synchronized(fullCache) { fullCache[key] = it } }
+            }
         }
     }
 
@@ -78,6 +148,46 @@ object ImageLoader {
     }
 
     private fun decodeScaled(bytes: ByteArray, maxDim: Int): ImageBitmap {
+        // 优先走 Skia Codec 的「按目标尺寸解码」：JPEG 这类格式支持 1/2、1/4、1/8 缩放解码，
+        // 避免「先把上亿像素铺进内存再缩小」的峰值。带 EXIF 旋转的图仍走旧路径，行为不变。
+        runCatching { decodeScaledViaCodec(bytes, maxDim) }.getOrNull()?.let { return it }
+        return decodeScaledViaFullImage(bytes, maxDim)
+    }
+
+    private fun decodeScaledViaCodec(bytes: ByteArray, maxDim: Int): ImageBitmap? {
+        val data = Data.makeFromBytes(bytes)
+        try {
+            val codec = Codec.makeFromData(data)
+            try {
+                val info = codec.imageInfo
+                val iw = info.width
+                val ih = info.height
+                if (iw <= 0 || ih <= 0) return null
+                // Codec.readPixels 不做 EXIF 旋转，有方向信息时交回旧路径处理。
+                if (codec.encodedOrigin != EncodedOrigin.TOP_LEFT) return null
+                val scale = minOf(1f, maxDim.toFloat() / maxOf(iw, ih).toFloat())
+                val w = maxOf(1, (iw * scale).toInt())
+                val h = maxOf(1, (ih * scale).toInt())
+                val bitmap = Bitmap()
+                bitmap.allocPixels(ImageInfo.makeN32Premul(w, h))
+                try {
+                    codec.readPixels(bitmap)
+                    val pixels = bitmap.readPixels() ?: return null
+                    val image = Image.makeRaster(bitmap.imageInfo, pixels, bitmap.rowBytes)
+                    return image.toComposeImageBitmap()
+                } finally {
+                    bitmap.close()
+                }
+            } finally {
+                codec.close()
+            }
+        } finally {
+            data.close()
+        }
+    }
+
+    /** 回退路径：整图解码后再缩放（PNG 等没有缩放解码支持、或带 EXIF 方向的图）。 */
+    private fun decodeScaledViaFullImage(bytes: ByteArray, maxDim: Int): ImageBitmap {
         val src = Image.makeFromEncoded(bytes)
         val iw = src.width
         val ih = src.height

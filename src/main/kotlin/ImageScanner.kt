@@ -1,30 +1,71 @@
 package gallery
 
 import java.io.File
+import java.util.Collections
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 object ImageScanner {
     val EXTENSIONS = setOf("jpg", "jpeg", "png", "gif", "bmp", "webp", "ico", "jfif", "avif")
 
+    /** 并行遍历子目录的 worker 数：瓶颈在磁盘，开太多反而更慢。 */
+    private const val SCAN_WORKERS = 8
+
     suspend fun scan(folder: File, recursive: Boolean, maxFiles: Int = 20_000): List<ImageItem> =
         withContext(Dispatchers.IO) {
-            val result = ArrayList<ImageItem>()
-            fun walk(dir: File) {
-                if (result.size >= maxFiles) return
-                val children = dir.listFiles() ?: return
-                for (f in children) {
-                    if (result.size >= maxFiles) return
-                    when {
-                        f.isDirectory && recursive -> walk(f)
-                        f.isFile && f.extension.lowercase() in EXTENSIONS ->
-                            result += ImageItem(FileSource(f), f.name, f.length(), f.lastModified())
+            val found = Collections.synchronizedList(ArrayList<ImageItem>())
+            if (!recursive) {
+                collectImages(folder, found, maxFiles)
+                return@withContext found.take(maxFiles)
+            }
+
+            // 递归目录树由多个 worker 并行遍历：单个大目录（上万文件）能明显缩短等待时间。
+            // pending = 已入队但尚未处理完的目录数，归零时关闭队列让 worker 退出。
+            val queue = Channel<File>(Channel.UNLIMITED)
+            val pending = AtomicInteger(1)
+            queue.trySend(folder)
+            coroutineScope {
+                repeat(SCAN_WORKERS) {
+                    launch {
+                        for (dir in queue) {
+                            if (found.size < maxFiles) {
+                                val children = dir.listFiles()
+                                if (children != null) {
+                                    for (f in children) {
+                                        when {
+                                            f.isDirectory -> {
+                                                pending.incrementAndGet()
+                                                queue.trySend(f)
+                                            }
+                                            f.isFile && f.extension.lowercase() in EXTENSIONS ->
+                                                if (found.size < maxFiles) {
+                                                    found += ImageItem(FileSource(f), f.name, f.length(), f.lastModified())
+                                                }
+                                        }
+                                    }
+                                }
+                            }
+                            if (pending.decrementAndGet() == 0) queue.close()
+                        }
                     }
                 }
             }
-            walk(folder)
-            result
+            found.take(maxFiles)
         }
+
+    private fun collectImages(dir: File, result: MutableList<ImageItem>, maxFiles: Int) {
+        val children = dir.listFiles() ?: return
+        for (f in children) {
+            if (result.size >= maxFiles) return
+            if (f.isFile && f.extension.lowercase() in EXTENSIONS) {
+                result += ImageItem(FileSource(f), f.name, f.length(), f.lastModified())
+            }
+        }
+    }
 
     suspend fun scanArchive(archiveFile: File, reader: ArchiveReader): List<ImageItem> =
         withContext(Dispatchers.IO) {

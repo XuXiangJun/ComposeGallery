@@ -305,6 +305,14 @@ fun App(state: AppState, onToggleFullscreen: () -> Unit) {
         state.updateProgress()
     }
 
+    // 预取相邻图片：翻页时直接命中全尺寸缓存，不用干等解码（失败静默忽略）。
+    LaunchedEffect(state.selectedIndex, state.images) {
+        val i = state.selectedIndex
+        if (i < 0) return@LaunchedEffect
+        val neighbours = listOfNotNull(state.images.getOrNull(i + 1), state.images.getOrNull(i - 1))
+        neighbours.forEach { nb -> launch { gallery.ImageLoader.prefetch(nb.source) } }
+    }
+
     // Slideshow loop.
     LaunchedEffect(state.slideshow, state.selectedIndex) {
         while (state.slideshow && state.images.isNotEmpty()) {

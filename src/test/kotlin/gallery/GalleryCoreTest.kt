@@ -92,6 +92,58 @@ class GalleryCoreTest {
 
     private fun item(name: String) = ImageItem(FileSource(File(tmpDir, name)), name, 1024L, 0L)
 
+    /**
+     * 造一棵多层目录树（相对目录 -> 文件名），用来验证并行扫描的结果与串行语义一致。
+     * 用 List 而不是 Map：顶层目录会出现多次，Map 会覆盖同名 key。
+     */
+    private fun makeTree(root: File, files: List<Pair<String, String>>): Set<String> {
+        files.forEach { (rel, name) ->
+            val dir = if (rel.isEmpty()) root else File(root, rel)
+            dir.mkdirs()
+            File(dir, name).writeBytes(byteArrayOf(0))
+        }
+        // 只有图片扩展名计入期望值：扫描会（正确地）忽略 not-image.txt 这类文件。
+        return files.map { (_, name) -> name }
+            .filter { ext -> ext.substringAfterLast('.', "").lowercase() in ImageScanner.EXTENSIONS }
+            .toSet()
+    }
+
+    @Test
+    fun recursiveScanFindsImagesInNestedFolders() = runBlocking {
+        val root = File(tmpDir, "tree")
+        val expected = makeTree(
+            root,
+            listOf(
+                "" to "a.jpg",
+                "" to "b.png",
+                "" to "not-image.txt",
+                "a" to "c.gif",
+                "a/sub" to "d.webp",
+                "b" to "e.jpeg",
+            ),
+        )
+
+        // 非递归：只看顶层，且扩展名不符的忽略
+        val flat = ImageScanner.scan(root, recursive = false)
+        assertEquals(setOf("a.jpg", "b.png"), flat.map { it.name }.toSet())
+
+        // 递归：所有层级的图片都要找到（并行遍历不能漏目录、也不能重复计数）
+        val all = ImageScanner.scan(root, recursive = true)
+        assertEquals(expected, all.map { it.name }.toSet())
+        assertEquals(expected.size, all.size, "不应有重复或遗漏")
+    }
+
+    @Test
+    fun recursiveScanRespectsMaxFiles() = runBlocking {
+        val root = File(tmpDir, "many").apply { mkdirs() }
+        File(root, "sub").apply { mkdirs() }
+        repeat(20) { i -> File(root, "img$i.jpg").writeBytes(byteArrayOf(0)) }
+        repeat(20) { i -> File(File(root, "sub"), "nested$i.png").writeBytes(byteArrayOf(0)) }
+
+        val limited = ImageScanner.scan(root, recursive = true, maxFiles = 10)
+        assertEquals(10, limited.size)
+    }
+
     @Test
     fun filterImagesTrimsAndIgnoresCase() {
         val list = listOf(item("Cat.jpg"), item("dog.png"), item("catalog.gif"))

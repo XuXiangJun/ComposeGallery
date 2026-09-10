@@ -6,6 +6,7 @@ import org.apache.commons.compress.archivers.zip.ZipArchiveEntry
 import org.apache.commons.compress.archivers.zip.ZipFile as CompressZipFile
 import java.io.File
 import java.nio.charset.Charset
+import java.util.LinkedHashMap
 
 /**
  * 读取压缩包内条目的统一封装。
@@ -26,43 +27,67 @@ class ArchiveReader private constructor(
         val isDirectory: Boolean,
     )
 
-    private val zipEntryByName: Map<String, ZipArchiveEntry>? =
-        zip?.entries?.toList()?.associateBy { it.name }
+    // 条目表只遍历一次：原先 entries 与 byName 各遍历一遍，大压缩包白跑一次。
+    private val zipEntries: List<ZipArchiveEntry> = zip?.entries?.toList().orEmpty()
+    private val zipEntryByName: Map<String, ZipArchiveEntry> = zipEntries.associateBy { it.name }
 
-    private val sevenZEntryByName: Map<String, SevenZArchiveEntry>? =
-        sevenZ?.entries?.associateBy { it.name }
+    private val sevenZEntries: List<SevenZArchiveEntry> = sevenZ?.entries?.toList().orEmpty()
+    private val sevenZEntryByName: Map<String, SevenZArchiveEntry> = sevenZEntries.associateBy { it.name }
 
     val entries: List<Entry> = buildList {
-        when {
-            zip != null -> zip.entries.toList().forEach {
-                add(Entry(it.name, it.size, it.lastModifiedDate?.time ?: 0L, it.isDirectory))
-            }
-            sevenZ != null -> sevenZ.entries.forEach {
-                add(Entry(it.name, it.size, it.lastModifiedDate?.time ?: 0L, it.isDirectory))
-            }
+        zipEntries.forEach {
+            add(Entry(it.name, it.size, it.lastModifiedDate?.time ?: 0L, it.isDirectory))
+        }
+        sevenZEntries.forEach {
+            add(Entry(it.name, it.size, it.lastModifiedDate?.time ?: 0L, it.isDirectory))
         }
     }
+
+    /**
+     * 最近读过的条目字节（LRU）。翻页/缩放会反复读同一张图，zip 每次都要重新解压、
+     * 7z 更贵；这里按「条目数 + 总字节」双重上限缓存，避免内存与重复解压两头吃亏。
+     */
+    private val entryCache = LinkedHashMap<String, ByteArray>(8, 0.75f, true)
 
     @Synchronized
-    fun readEntry(name: String): ByteArray = when {
-        zip != null -> {
-            val e = zipEntryByName?.get(name) ?: throw NoSuchElementException("zip entry: $name")
-            zip.getInputStream(e).use { it.readBytes() }
+    fun readEntry(name: String): ByteArray {
+        entryCache[name]?.let { return it }
+        val bytes = when {
+            zip != null -> {
+                val e = zipEntryByName[name] ?: throw NoSuchElementException("zip entry: $name")
+                zip.getInputStream(e).use { it.readBytes() }
+            }
+            sevenZ != null -> {
+                val e = sevenZEntryByName[name] ?: throw NoSuchElementException("7z entry: $name")
+                sevenZ.getInputStream(e).use { it.readBytes() }
+            }
+            else -> throw IllegalStateException("no archive loaded")
         }
-        sevenZ != null -> {
-            val e = sevenZEntryByName?.get(name) ?: throw NoSuchElementException("7z entry: $name")
-            sevenZ.getInputStream(e).use { it.readBytes() }
-        }
-        else -> throw IllegalStateException("no archive loaded")
+        cachePut(name, bytes)
+        return bytes
     }
 
+    private fun cachePut(name: String, bytes: ByteArray) {
+        entryCache[name] = bytes
+        while ((entryCache.size > ENTRY_CACHE_COUNT || cacheBytes() > ENTRY_CACHE_BYTES) && entryCache.size > 1) {
+            val eldest = entryCache.keys.firstOrNull() ?: break
+            entryCache.remove(eldest)
+        }
+    }
+
+    private fun cacheBytes(): Long = entryCache.values.sumOf { it.size.toLong() }
+
     override fun close() {
+        entryCache.clear()
         try { zip?.close() } catch (_: Throwable) {}
         try { sevenZ?.close() } catch (_: Throwable) {}
     }
 
     companion object {
         val SUPPORTED_EXTENSIONS = setOf("zip", "7z")
+
+        private const val ENTRY_CACHE_COUNT = 8
+        private const val ENTRY_CACHE_BYTES = 32L * 1024 * 1024
 
         fun isSupported(file: File): Boolean = file.extension.lowercase() in SUPPORTED_EXTENSIONS
 
