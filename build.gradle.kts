@@ -197,8 +197,17 @@ val packageZip = tasks.register("packageZip") {
         val appName = "ComposeGallery"
         // macOS 的 app-image 是 ComposeGallery.app 目录，Windows / Linux 是无扩展名的同名目录。
         val appImageDirName = if (isMac) "$appName.app" else appName
-        // 清理上次生成的 app image，否则 jpackage 会因目录已存在而失败
-        File(destDir, appImageDirName).deleteRecursively()
+        // 清理上次生成的 app image，否则 jpackage 会因目录已存在而失败。
+        // 注意：jpackage 生成的 launcher（Windows 上是 ComposeGallery.exe）带只读属性，
+        // File.deleteRecursively() 碰到只读文件会静默失败并留下目录，导致下一次打包报
+        // 「应用程序目标目录已存在」。所以先递归清掉只读属性，再删除并校验结果。
+        val appImageDir = File(destDir, appImageDirName)
+        if (appImageDir.exists()) {
+            appImageDir.walkBottomUp().toList().forEach { it.setWritable(true) }
+            check(appImageDir.deleteRecursively()) {
+                "无法清理上一次的 app image 目录：${appImageDir.absolutePath}（可能仍被占用，请手动删除后重试）"
+            }
+        }
 
         val jpackageArgs = mutableListOf(
             jpackage,
@@ -230,9 +239,13 @@ val packageZip = tasks.register("packageZip") {
         val proc = pb.start()
         val code = proc.waitFor()
         check(code == 0) {
+            // jpackage 在中文 Windows 上按本地编码（GBK/GB18030）输出，按 UTF-8 读会乱码。
+            // charset(...) 是 kotlin.text 的顶层函数，无需 import（写 java.nio.charset.Charset
+            // 全限定名会失败：脚本里的 java 指向 Gradle 的 java 扩展）。
+            val logText = if (isWindows) String(jpackageLog.readBytes(), charset("GB18030")) else jpackageLog.readText()
             "jpackage app-image failed with exit $code\n" +
                 "--- jpackage output (${jpackageLog.absolutePath}) ---\n" +
-                jpackageLog.readText().takeLast(4000)
+                logText.takeLast(4000)
         }
 
         // 打包成 zip
