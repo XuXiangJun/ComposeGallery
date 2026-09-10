@@ -86,6 +86,12 @@ import kotlin.math.roundToInt
 /** 信息面板的「修改时间」格式：复用同一实例，避免每次重组都 new（仅 UI 线程使用）。 */
 private val infoDateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss")
 
+/**
+ * 顶部 / 底部工具栏的高度（顶栏 = IconButton 48dp + 上下各 4dp，底栏略矮）。
+ * 信息面板要按这个值留白，否则内容会被工具栏压住。
+ */
+private val ViewerBarInset = 56.dp
+
 class ZoomState {
     var scale by mutableStateOf(1f)
     var offsetX by mutableStateOf(0f)
@@ -202,6 +208,12 @@ fun ImageViewer(
             }
         }
 
+        // 信息面板必须在工具栏**之前**声明：Compose 里后声明的在上层，而面板占满右侧全高，
+        // 一旦盖住顶栏的「信息」按钮，点击就会落在面板上，用户再也关不掉它。
+        if (showInfo) {
+            InfoPanel(item, loadedImage, onClose = onToggleInfo)
+        }
+
         if (showUi) {
             ViewerTopBar(
                 name = item.name,
@@ -225,10 +237,6 @@ fun ImageViewer(
                 slideshowSeconds = slideshowSeconds,
                 onSlideshowSecondsChange = onSlideshowSecondsChange,
             )
-        }
-
-        if (showInfo) {
-            InfoPanel(item, loadedImage)
         }
     }
 }
@@ -326,17 +334,34 @@ private fun BoxScope.ViewerBottomBar(
 }
 
 @Composable
-private fun BoxScope.InfoPanel(item: ImageItem, loadedImage: LoadedImage?) {
+private fun BoxScope.InfoPanel(item: ImageItem, loadedImage: LoadedImage?, onClose: () -> Unit) {
     val s = LocalStrings.current
     Surface(
-        Modifier.align(Alignment.CenterEnd).width(300.dp).fillMaxHeight(),
+        Modifier
+            .align(Alignment.CenterEnd)
+            .width(300.dp)
+            .fillMaxHeight()
+            // 吃掉面板区域的点击，避免穿透到底下的图片 —— 那会触发「点一下隐藏工具栏」，
+            // 结果用户想点面板却把工具栏点没了。
+            .pointerInput(Unit) { detectTapGestures { } },
         color = ViewerPanelScrim,
     ) {
         Column(
-            Modifier.padding(16.dp).verticalScroll(rememberScrollState()),
+            Modifier
+                // 上下留出工具栏高度，内容才不会被顶栏 / 底栏压住。
+                .padding(top = ViewerBarInset, bottom = ViewerBarInset, start = 16.dp, end = 8.dp)
+                .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Text(s.t(StringsKey.FileInfo), color = Accent, fontSize = 14.sp)
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(s.t(StringsKey.FileInfo), color = Accent, fontSize = 14.sp, modifier = Modifier.weight(1f))
+                IconButton(
+                    onClick = onClose,
+                    modifier = Modifier.height(28.dp).width(28.dp),
+                ) {
+                    Icon(Icons.Filled.Close, s.t(StringsKey.Close), tint = ViewerIcon, modifier = Modifier.height(16.dp).width(16.dp))
+                }
+            }
             InfoRow(s.t(StringsKey.InfoName), item.name)
             InfoRow(s.t(StringsKey.InfoDimensions), "${loadedImage?.width ?: 0} × ${loadedImage?.height ?: 0} px")
             InfoRow(s.t(StringsKey.InfoFileSize), formatBytes(item.sizeBytes))
