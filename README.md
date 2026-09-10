@@ -29,13 +29,17 @@
 
 ## 运行
 
-### 其他电脑（新克隆项目）
+构建统一走项目自带的 Gradle Wrapper，不再有平台专属辅助脚本。
 
-你需要自己安装 **JDK 21**（并设置好 `JAVA_HOME`，项目用 `jvmToolchain(21)`）。
-**无需手动装 Gradle**——项目自带 Gradle Wrapper，首次运行会自动下载 Gradle 9.7.1；
-依赖会从 Maven Central 自动下载。
+### 准备
 
-Windows / Linux / macOS 用的是同一套 wrapper，命令一致（Windows 上是 `gradlew.bat`）：
+只需要 **JDK 21**（项目用 `jvmToolchain(21)`；Gradle 会自动探测已安装的 JDK，也可用 `JAVA_HOME` 指定）。
+**无需手动装 Gradle**——wrapper 会按 `gradle/wrapper/gradle-wrapper.properties` 自动下载 Gradle 9.7.1，
+依赖从 Maven Central 自动下载。
+
+### 常用命令
+
+Windows / Linux / macOS 用的是同一套 wrapper，命令一致，只是 Windows 上要写 `gradlew.bat`：
 
 ```bash
 # macOS / Linux
@@ -51,7 +55,9 @@ Windows / Linux / macOS 用的是同一套 wrapper，命令一致（Windows 上�
 .\gradlew.bat packageZip
 ```
 
-分发包按平台生成（`build.gradle.kts` 里的 `targetFormats` 会按当前 OS 自动选择）：
+### 分平台打包
+
+分发包格式由 `build.gradle.kts` 里的 `targetFormats` 按当前 OS 自动选择：
 
 | 平台 | 命令 | 产物 | 备注 |
 | --- | --- | --- | --- |
@@ -69,27 +75,23 @@ Windows / Linux / macOS 用的是同一套 wrapper，命令一致（Windows 上�
 > 说明：`packageMsi` 在普通 Windows 上能正常做 ICE 校验；`wrapWixLight` 的 light.exe
 > 包装器只在沙箱环境（WiX 缓存存在）时启用，普通机器会自动跳过。
 
-### 本机沙箱环境
+### 受限 / CI 环境
 
-本机使用封装好的 `build.ps1`（固定 JDK 21、把缓存 / 临时目录 / skiko 解压目录重定向到
-`D:\ai\.tools`，规避沙箱对 `C:\Users\...` 的写入限制，然后调用项目自带的 Gradle wrapper）：
+Gradle 的用户目录默认是 `~/.gradle`（Windows 为 `%USERPROFILE%\.gradle`）：依赖缓存、wrapper
+下载的 Gradle 分发包都放在那里。若该目录（或系统临时目录）不可写，用环境变量指到可写位置即可：
 
-```powershell
-& D:\ai\gallery\build.ps1 run          # 启动
-& D:\ai\gallery\build.ps1 test         # 跑测试
-& D:\ai\gallery\build.ps1 packageMsi   # 打 MSI
-& D:\ai\gallery\build.ps1 packageZip   # 打免安装 zip
-# 产物：build\compose\binaries\main\msi\ComposeGallery-1.0.0.msi
-#       build\compose\binaries\main\app\ComposeGallery-1.0.0.zip
+```bash
+GRADLE_USER_HOME=/tmp/gradle-home TMPDIR=/tmp ./gradlew test
 ```
 
-`build.ps1` 里的 `JAVA_HOME` / `GRADLE_USER_HOME` / `TMP` 只有在对应沙箱目录存在时才生效，
-所以在普通 Windows 机器上直接用 `.\gradlew.bat` 也可以，不会被这些路径影响。
+```powershell
+$env:GRADLE_USER_HOME = "D:\gradle-home"; $env:TMP = $env:TEMP = "D:\tmp"; .\gradlew.bat test
+```
 
 ### 打包说明
 
 `packageMsi` 用 JDK 自带的 jpackage + jlink + WiX 生成 MSI。首次运行会自动联网下载
-WiX 3（约 34 MB，缓存在 `D:\ai\.tools\gradle-home\compose-jb\wix311.zip`）。
+WiX 3（约 34 MB，缓存到 Gradle 用户目录下的 `compose-jb/wix311.zip`）。
 
 > 沙箱内打包的一个特殊处理：WiX 的 `light.exe` 做 ICE 校验时需要访问 Windows
 > Installer Service，而沙箱里该服务不可用，会导致打包失败（exit 216）。为此
@@ -97,15 +99,6 @@ WiX 3（约 34 MB，缓存在 `D:\ai\.tools\gradle-home\compose-jb\wix311.zip`�
 > `build/wix311/real/`，再用 `packaging/LightWrapper.cs` 编译出一个 light.exe
 > 包装器，链接时自动追加 `-sval` 跳过 ICE 校验。在普通（非沙箱）机器上打包时
 > 也可删除这段逻辑。
-
-等价的手工命令（`build.ps1` 内部做的事）：
-
-```powershell
-$env:JAVA_HOME = "D:\ai\.tools\jdk21\jdk-21.0.12+8"   # 沙箱内 JDK；普通机器用自己装的 JDK 21
-$env:GRADLE_USER_HOME = "D:\ai\.tools\gradle-home"
-$env:TMP = $env:TEMP = "D:\ai\.tools\tmp"
-D:\ai\gallery\gradlew.bat -p D:\ai\gallery run
-```
 
 ## 操作说明
 
@@ -122,10 +115,10 @@ D:\ai\gallery\gradlew.bat -p D:\ai\gallery run
 ```
 gallery/
 ├── build.gradle.kts          # 构建脚本（平台判定 + JUnit5 测试 + 沙箱临时目录重定向 + 打包）
-├── build.ps1                 # Windows 辅助脚本（沙箱路径 + 调用 gradlew）
 ├── .gitattributes            # 行尾规则（gradlew/*.sh 固定 LF，*.bat/*.ps1 固定 CRLF）
 ├── settings.gradle.kts
 ├── gradle.properties
+├── gradlew / gradlew.bat     # Gradle Wrapper（Linux/macOS 用 gradlew，Windows 用 gradlew.bat）
 └── src/main/kotlin/
     ├── Main.kt               # 入口 + 全屏处理
     ├── AppState.kt           # 应用状态 + 书架/进度/最近打开/主题/搜索

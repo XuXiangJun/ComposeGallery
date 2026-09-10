@@ -61,7 +61,8 @@ val wrapWixLight = tasks.register("wrapWixLight") {
         val wixDir = file("build/wix311")
         val lightExe = File(wixDir, "light.exe")
         val realDir = File(wixDir, "real")
-        val wixZip = File("D:\\ai\\.tools\\gradle-home\\compose-jb\\wix311.zip")
+        // WiX 缓存位置跟随实际的 GRADLE_USER_HOME（compose 插件把 WiX 下到这里）。
+        val wixZip = File(gradle.gradleUserHomeDir, "compose-jb/wix311.zip")
         val src = file("packaging/LightWrapper.cs")
         if (!lightExe.exists()) {
             logger.lifecycle("light.exe missing; skipping wrapper install")
@@ -154,6 +155,12 @@ tasks.matching { it.name == "packageMsi" }.configureEach {
     dependsOn(wrapWixLight)
 }
 
+// packageZip 里的 jpackage 取自 toolchain 指定的 JDK 21：Gradle daemon 可能跑在系统其它 JDK
+// （例如 JDK 25）上，而 runtime image 是由 toolchain 21 生成的，JDK 不匹配时 jpackage 会失败（exit 1）。
+val jdk21Launcher = javaToolchains.launcherFor {
+    languageVersion.set(org.gradle.jvm.toolchain.JavaLanguageVersion.of(21))
+}
+
 // 免安装 zip 版：jpackage --type app-image（不需要 WiX），再打包成 zip。
 val packageZip = tasks.register("packageZip") {
     group = "build"
@@ -179,8 +186,8 @@ val packageZip = tasks.register("packageZip") {
             if (f.isFile) f.copyTo(File(libsDir, f.name), overwrite = true)
         }
 
-        // 用 Gradle 运行 JDK 里的 jpackage（JAVA_HOME 需为含 jpackage 的 JDK，避免硬编码本机路径）。
-        val jpHome = File(System.getProperty("java.home"))
+        // 用 toolchain 的 JDK 21 里的 jpackage（见文件上方 jdk21Launcher 的说明）。
+        val jpHome = jdk21Launcher.get().metadata.installationPath.asFile
         // Windows 上是 jpackage.exe，Linux / macOS 上是无扩展名的 jpackage。
         val jpackageName = if (isWindows) "jpackage.exe" else "jpackage"
         val jpackage = File(jpHome, "bin/$jpackageName").absolutePath
@@ -215,10 +222,18 @@ val packageZip = tasks.register("packageZip") {
         }
         val pb = ProcessBuilder(jpackageArgs)
         pb.redirectErrorStream(true)
-        pb.redirectOutput(ProcessBuilder.Redirect.INHERIT)
+        // 捕获 jpackage 的输出：INHERIT 会让它的报错落进 Gradle daemon 日志而不可见，
+        // 打包失败时无从排查。
+        val jpackageLog = File(buildDirFile, "compose/tmp/packageZip/jpackage.log")
+        jpackageLog.parentFile?.mkdirs()
+        pb.redirectOutput(jpackageLog)
         val proc = pb.start()
         val code = proc.waitFor()
-        check(code == 0) { "jpackage app-image failed with exit $code" }
+        check(code == 0) {
+            "jpackage app-image failed with exit $code\n" +
+                "--- jpackage output (${jpackageLog.absolutePath}) ---\n" +
+                jpackageLog.readText().takeLast(4000)
+        }
 
         // 打包成 zip
         val appDir = File(destDir, appImageDirName)

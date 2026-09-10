@@ -1,0 +1,1 @@
+- 编译和测试统一用项目自带的 Gradle Wrapper：macOS/Linux 用 `./gradlew`，Windows 用 `.\gradlew.bat`
