@@ -11,5 +11,5 @@ $env:TMPDIR = "D:\ai\.tools\tmp"
 New-Item -ItemType Directory -Force -Path $env:TMP | Out-Null
 New-Item -ItemType Directory -Force -Path $env:GRADLE_USER_HOME | Out-Null
 
-& "D:\ai\.tools\gradle-8.14.2\bin\gradle.bat" -p "D:\ai\gallery" @args
+& "D:\ai\.tools\gradle-9.7.1\bin\gradle.bat" -p "D:\ai\gallery" @args
 exit $LASTEXITCODE
