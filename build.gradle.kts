@@ -53,17 +53,23 @@ tasks.test {
 // Wrap WiX light.exe so it appends "-sval" (skip ICE validation). ICE validation
 // requires the Windows Installer Service, which is unavailable in the sandbox and
 // makes light.exe exit with 216. Runs after unzipWix, before packageMsi.
+//
+// 注意：configuration cache 不允许任务执行期访问 project / gradle，
+// 所以这里把需要的路径都在配置期抓成普通值。
 val wrapWixLight = tasks.register("wrapWixLight") {
     group = "build"
     description = "Wrap WiX light.exe to skip ICE validation"
     dependsOn("unzipWix")
+
+    val wixDir = file("build/wix311")
+    val lightExe = File(wixDir, "light.exe")
+    val realDir = File(wixDir, "real")
+    // WiX 缓存位置跟随实际的 GRADLE_USER_HOME（compose 插件把 WiX 下到这里）。
+    val wixZip = File(gradle.gradleUserHomeDir, "compose-jb/wix311.zip")
+    val wrapperSrc = file("packaging/LightWrapper.cs")
+    val csc = "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe"
+
     doLast {
-        val wixDir = file("build/wix311")
-        val lightExe = File(wixDir, "light.exe")
-        val realDir = File(wixDir, "real")
-        // WiX 缓存位置跟随实际的 GRADLE_USER_HOME（compose 插件把 WiX 下到这里）。
-        val wixZip = File(gradle.gradleUserHomeDir, "compose-jb/wix311.zip")
-        val src = file("packaging/LightWrapper.cs")
         if (!lightExe.exists()) {
             logger.lifecycle("light.exe missing; skipping wrapper install")
             return@doLast
@@ -98,8 +104,7 @@ val wrapWixLight = tasks.register("wrapWixLight") {
         }
 
         // Overwrite build/wix311/light.exe with the wrapper.
-        val csc = "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe"
-        val pb = ProcessBuilder(csc, "/nologo", "/out:${lightExe.absolutePath}", src.absolutePath)
+        val pb = ProcessBuilder(csc, "/nologo", "/out:${lightExe.absolutePath}", wrapperSrc.absolutePath)
         pb.redirectErrorStream(true)
         pb.redirectOutput(ProcessBuilder.Redirect.INHERIT)
         val proc = pb.start()
@@ -166,37 +171,45 @@ val packageZip = tasks.register("packageZip") {
     group = "build"
     description = "Build a portable zip distribution (jpackage app-image)"
     dependsOn("createRuntimeImage", "jar", "unpackDefaultComposeDesktopJvmApplicationResources")
+
+    // configuration cache 要求任务执行期不访问 project / configurations / tasks，
+    // 因此这些都在配置期解析成普通值（File / List<File> / String）后捕获进任务。
+    val buildDirFile = layout.buildDirectory.get().asFile
+    val runtimeJars = configurations.getByName("runtimeClasspath").files
+        .filter { it.isFile && it.name.endsWith(".jar") }
+    val mainJar = tasks.named<Jar>("jar").get().archiveFile.get().asFile
+    val skikoDir = File(buildDirFile, "compose/tmp/skiko")
+    val runtimeImageDir = File(buildDirFile, "compose/tmp/main/runtime")
+    val destDir = File(buildDirFile, "compose/binaries/main/app")
+    val appIcon = file("src/main/resources/icon.ico")
+    val jpackageHome = jdk21Launcher.get().metadata.installationPath.asFile
+    val win = isWindows
+    val mac = isMac
+    val appVersion = version.toString()
+
     doLast {
-        val buildDirFile = layout.buildDirectory.asFile.get()
         val libsDir = File(buildDirFile, "compose/tmp/packageZip/libs")
         libsDir.deleteRecursively()
         libsDir.mkdirs()
 
         // 依赖 jar + 主 jar
-        configurations.getByName("runtimeClasspath").files.forEach { f ->
-            if (f.isFile && f.name.endsWith(".jar")) {
-                f.copyTo(File(libsDir, f.name), overwrite = true)
-            }
-        }
-        val mainJar = tasks.named<Jar>("jar").get().archiveFile.get().asFile
+        runtimeJars.forEach { it.copyTo(File(libsDir, it.name), overwrite = true) }
         mainJar.copyTo(File(libsDir, mainJar.name), overwrite = true)
 
         // skiko 原生库 + icudtl.dat（Compose 已解压到 tmp/skiko）
-        File(buildDirFile, "compose/tmp/skiko").listFiles()?.forEach { f ->
+        skikoDir.listFiles()?.forEach { f ->
             if (f.isFile) f.copyTo(File(libsDir, f.name), overwrite = true)
         }
 
-        // 用 toolchain 的 JDK 21 里的 jpackage（见文件上方 jdk21Launcher 的说明）。
-        val jpHome = jdk21Launcher.get().metadata.installationPath.asFile
+        // 用 toolchain 的 JDK 21 里的 jpackage（见上方 jdk21Launcher 的说明）。
         // Windows 上是 jpackage.exe，Linux / macOS 上是无扩展名的 jpackage。
-        val jpackageName = if (isWindows) "jpackage.exe" else "jpackage"
-        val jpackage = File(jpHome, "bin/$jpackageName").absolutePath
-        val runtimeImage = File(buildDirFile, "compose/tmp/main/runtime")
-        val destDir = File(buildDirFile, "compose/binaries/main/app")
+        val jpackageName = if (win) "jpackage.exe" else "jpackage"
+        val jpackage = File(jpackageHome, "bin/$jpackageName").absolutePath
+
         destDir.mkdirs()
         val appName = "ComposeGallery"
         // macOS 的 app-image 是 ComposeGallery.app 目录，Windows / Linux 是无扩展名的同名目录。
-        val appImageDirName = if (isMac) "$appName.app" else appName
+        val appImageDirName = if (mac) "$appName.app" else appName
         // 清理上次生成的 app image，否则 jpackage 会因目录已存在而失败。
         // 注意：jpackage 生成的 launcher（Windows 上是 ComposeGallery.exe）带只读属性，
         // File.deleteRecursively() 碰到只读文件会静默失败并留下目录，导致下一次打包报
@@ -213,11 +226,11 @@ val packageZip = tasks.register("packageZip") {
             jpackage,
             "--type", "app-image",
             "--input", libsDir.absolutePath,
-            "--runtime-image", runtimeImage.absolutePath,
+            "--runtime-image", runtimeImageDir.absolutePath,
             "--main-jar", mainJar.name,
             "--main-class", "gallery.MainKt",
             "--name", appName,
-            "--app-version", version.toString(),
+            "--app-version", appVersion,
             "--vendor", "Compose Gallery",
             "--description", "Compose Gallery - image viewer & comic bookshelf",
             "--dest", destDir.absolutePath,
@@ -226,8 +239,8 @@ val packageZip = tasks.register("packageZip") {
         )
         // --icon 只在 Windows 上传：macOS 的 app-image 只接受 .icns（仓库暂无），
         // Linux 的 app-image 不使用图标参数。
-        if (isWindows) {
-            jpackageArgs += listOf("--icon", File(projectDir, "src/main/resources/icon.ico").absolutePath)
+        if (win) {
+            jpackageArgs += listOf("--icon", appIcon.absolutePath)
         }
         val pb = ProcessBuilder(jpackageArgs)
         pb.redirectErrorStream(true)
@@ -242,7 +255,7 @@ val packageZip = tasks.register("packageZip") {
             // jpackage 在中文 Windows 上按本地编码（GBK/GB18030）输出，按 UTF-8 读会乱码。
             // charset(...) 是 kotlin.text 的顶层函数，无需 import（写 java.nio.charset.Charset
             // 全限定名会失败：脚本里的 java 指向 Gradle 的 java 扩展）。
-            val logText = if (isWindows) String(jpackageLog.readBytes(), charset("GB18030")) else jpackageLog.readText()
+            val logText = if (win) String(jpackageLog.readBytes(), charset("GB18030")) else jpackageLog.readText()
             "jpackage app-image failed with exit $code\n" +
                 "--- jpackage output (${jpackageLog.absolutePath}) ---\n" +
                 logText.takeLast(4000)
@@ -250,7 +263,7 @@ val packageZip = tasks.register("packageZip") {
 
         // 打包成 zip
         val appDir = File(destDir, appImageDirName)
-        val zipFile = File(destDir, "ComposeGallery-${version}.zip")
+        val zipFile = File(destDir, "ComposeGallery-$appVersion.zip")
         ZipOutputStream(zipFile.outputStream()).use { zos ->
             appDir.walkTopDown().forEach { f ->
                 val rel = appDir.toPath().relativize(f.toPath()).toString().replace('\\', '/')
