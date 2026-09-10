@@ -5,9 +5,9 @@ import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
 
 plugins {
-    kotlin("jvm") version "2.1.21"
-    id("org.jetbrains.kotlin.plugin.compose") version "2.1.21"
-    id("org.jetbrains.compose") version "1.8.2"
+    kotlin("jvm") version "2.4.20"
+    id("org.jetbrains.kotlin.plugin.compose") version "2.4.20"
+    id("org.jetbrains.compose") version "1.12.0"
 }
 
 group = "com.example"
@@ -25,11 +25,14 @@ dependencies {
     implementation(compose.material3)
     implementation("org.jetbrains.compose.material:material-icons-core:1.7.3")
     implementation("org.apache.commons:commons-compress:1.28.0")
-    implementation("com.google.code.gson:gson:2.11.0")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-swing:1.10.1")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.1")
+    implementation("com.google.code.gson:gson:2.14.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-swing:1.11.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
 
     testImplementation(kotlin("test-junit5"))
+    // Align the whole JUnit 5 stack (jupiter + platform); kotlin-test-junit5
+    // only brings 5.10.1 / 1.10.1 transitively.
+    testImplementation(platform("org.junit:junit-bom:5.14.4"))
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 
