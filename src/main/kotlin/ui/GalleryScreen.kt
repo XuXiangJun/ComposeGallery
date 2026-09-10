@@ -36,7 +36,6 @@ import androidx.compose.material.Surface
 import androidx.compose.material.Text
 import androidx.compose.material.TextButton
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -473,45 +472,6 @@ private fun SearchField(
                     modifier = Modifier.size(24.dp),
                 ) {
                     Icon(Icons.Filled.Close, s.t(StringsKey.ClearSearch), tint = colors.onSurfaceMuted, modifier = Modifier.size(16.dp))
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun SortMenu(sortMode: SortMode, onSortChange: (SortMode) -> Unit) {
-    val s = LocalStrings.current
-    var expanded by remember { mutableStateOf(false) }
-    Box {
-        TextButton(onClick = { expanded = true }) {
-            Text(s.t(StringsKey.valueOf(sortMode.name)))
-            Icon(Icons.Filled.ArrowDropDown, null)
-        }
-        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-            SortMode.entries.forEach { m ->
-                DropdownMenuItem(onClick = { onSortChange(m); expanded = false }) {
-                    Text(s.t(StringsKey.valueOf(m.name)), color = if (m == sortMode) LocalGalleryColors.current.primary else LocalGalleryColors.current.onSurface)
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun ThemeMenu(themeMode: ThemeMode, onSetTheme: (ThemeMode) -> Unit) {
-    val s = LocalStrings.current
-    var expanded by remember { mutableStateOf(false) }
-    val colors = LocalGalleryColors.current
-    Box {
-        TextButton(onClick = { expanded = true }) {
-            Text(s.t(StringsKey.valueOf(themeMode.name)))
-            Icon(Icons.Filled.ArrowDropDown, null)
-        }
-        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-            ThemeMode.entries.forEach { m ->
-                DropdownMenuItem(onClick = { onSetTheme(m); expanded = false }) {
-                    Text(s.t(StringsKey.valueOf(m.name)), color = if (themeMode == m) colors.primary else colors.onSurface)
                 }
             }
         }
