@@ -11,5 +11,7 @@ $env:TMPDIR = "D:\ai\.tools\tmp"
 New-Item -ItemType Directory -Force -Path $env:TMP | Out-Null
 New-Item -ItemType Directory -Force -Path $env:GRADLE_USER_HOME | Out-Null
 
-& "D:\ai\.tools\gradle-9.7.1\bin\gradle.bat" -p "D:\ai\gallery" @args
+# Use the project's Gradle wrapper so the Gradle version is defined by
+# gradle/wrapper/gradle-wrapper.properties instead of a machine-local install.
+& "$PSScriptRoot\gradlew.bat" -p "$PSScriptRoot" @args
 exit $LASTEXITCODE
