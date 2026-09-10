@@ -94,26 +94,53 @@ class GalleryCoreTest {
     private fun item(name: String) = ImageItem(FileSource(File(tmpDir, name)), name, 1024L, 0L)
 
     /**
-     * 滚轮/手势缩放必须让光标下的内容保持不动。
-     * 这里模拟「同一锚点连续放大」：每放大一次，该锚点对应的图片坐标都不该变
-     *（曾经表现为「越滚越偏」，根因是事件回调用了过期的视口/尺寸）。
+     * 滚轮/手势缩放时，光标下的内容应保持不动。
+     * 注意要选一个不触及视口边界的场景：一旦图片边缘已经贴住视口，
+     * 锚点必然会被边界限制破坏（那是刻意的，见 zoomClampsImageInsideViewport）。
      */
     @Test
     fun zoomAtKeepsFocalPointStable() {
         val zoom = ZoomState()
-        zoom.viewportW = 800f
-        zoom.viewportH = 600f
-        zoom.baseW = 400f // 相当于 400x300 的图、fit = 1
+        zoom.viewportW = 400f
+        zoom.viewportH = 300f
+        zoom.baseW = 400f // 相当于 400x300 的图、fit = 1（正好铺满视口）
         zoom.baseH = 300f
 
-        val focal = androidx.compose.ui.geometry.Offset(180f, 140f)
+        val focal = androidx.compose.ui.geometry.Offset(150f, 120f)
         val before = zoom.imagePointAt(focal)
-        repeat(6) { zoom.zoomAt(1.15f, focal) }
+        repeat(3) { zoom.zoomAt(1.2f, focal) }
         val after = zoom.imagePointAt(focal)
 
         assertTrue(zoom.scale > 1f, "应当确实放大了")
         assertEquals(before.x, after.x, 0.01f, "光标下的图片横向坐标应保持不动")
         assertEquals(before.y, after.y, 0.01f, "光标下的图片纵向坐标应保持不动")
+    }
+
+    /**
+     * 放大到超过视口后，图片边缘不能被推出视口 ——
+     * 这正是「鼠标在界面两边滚动，图片就往两边跑」的成因。
+     */
+    @Test
+    fun zoomClampsImageInsideViewport() {
+        val zoom = ZoomState()
+        zoom.viewportW = 400f
+        zoom.viewportH = 300f
+        zoom.baseW = 400f
+        zoom.baseH = 300f
+
+        // 故意拿左上角当锚点反复放大：若没有边界限制，图片会被一路推出去、飞出视口
+        repeat(20) { zoom.zoomAt(1.5f, androidx.compose.ui.geometry.Offset(0f, 0f)) }
+
+        val drawnW = zoom.baseW * zoom.scale
+        val drawnH = zoom.baseH * zoom.scale
+        val left = (zoom.viewportW - drawnW) / 2f + zoom.offsetX
+        val top = (zoom.viewportH - drawnH) / 2f + zoom.offsetY
+
+        assertTrue(drawnW > zoom.viewportW, "前提：图片应已放大到超过视口")
+        assertTrue(left <= 0.01f, "图片左边缘不应越过视口左边界（否则露出黑边）")
+        assertTrue(top <= 0.01f, "图片上边缘不应越过视口上边界")
+        assertTrue(left + drawnW >= zoom.viewportW - 0.01f, "图片右边缘不应离开视口右边界")
+        assertTrue(top + drawnH >= zoom.viewportH - 0.01f, "图片下边缘不应离开视口下边界")
     }
 
     /** 一路缩回适应窗口及以下时应回到居中状态，不留平移残量。 */

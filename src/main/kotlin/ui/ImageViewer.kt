@@ -124,7 +124,10 @@ class ZoomState {
     private fun imageLeft(s: Float): Float = (viewportW - baseW * s) / 2f + offsetX
     private fun imageTop(s: Float): Float = (viewportH - baseH * s) / 2f + offsetY
 
-    /** 以 [focal]（视口坐标）为锚点缩放：该点下的图片内容保持不动。 */
+    /**
+     * 以 [focal]（视口坐标）为锚点缩放：该点下的图片内容尽量保持不动。
+     * 若该锚点要求把图片推出视口，则由 [clampToViewport] 收回来（见其说明）。
+     */
     fun zoomAt(factor: Float, focal: Offset) {
         if (baseW <= 0f || baseH <= 0f || viewportW <= 0f || viewportH <= 0f) return
         val oldScale = scale
@@ -136,7 +139,7 @@ class ZoomState {
         offsetX = (focal.x - (focal.x - left) * k) - (viewportW - baseW * newScale) / 2f
         offsetY = (focal.y - (focal.y - top) * k) - (viewportH - baseH * newScale) / 2f
         scale = newScale
-        clampIfFit()
+        clampToViewport()
     }
 
     /** 拖拽平移。 */
@@ -144,13 +147,13 @@ class ZoomState {
         if (dx == 0f && dy == 0f) return
         offsetX += dx
         offsetY += dy
-        clampIfFit()
+        clampToViewport()
     }
 
     /** 按钮缩放：以视口中心为锚点（所以只改 scale，不动 offset）。 */
     fun zoomBy(factor: Float) {
         scale = (scale * factor).coerceIn(0.02f, 64f)
-        clampIfFit()
+        clampToViewport()
     }
 
     fun to100() {
@@ -159,12 +162,22 @@ class ZoomState {
 
     fun toFit() = reset()
 
-    /** 适应窗口及以下时不该保留平移量。 */
-    private fun clampIfFit() {
-        if (scale <= 1f) {
-            offsetX = 0f
-            offsetY = 0f
-        }
+    /**
+     * 把平移量收进合理范围：图片比视口大时，边缘不能被推出视口（不留黑边）；
+     * 比视口小时居中。
+     *
+     * 没有这一步，以鼠标为锚点的缩放会顺着鼠标方向把图片一路推出视口 ——
+     * 表现就是「鼠标在界面两边滚动，图片往两边跑，越滚越偏」。
+     */
+    private fun clampToViewport() {
+        offsetX = clampAxis(offsetX, baseW * scale, viewportW)
+        offsetY = clampAxis(offsetY, baseH * scale, viewportH)
+    }
+
+    private fun clampAxis(offset: Float, drawn: Float, viewport: Float): Float {
+        if (drawn <= viewport) return 0f
+        val limit = (drawn - viewport) / 2f
+        return offset.coerceIn(-limit, limit)
     }
 
     /** 视口坐标 [p] 对应的图片像素坐标（相对图片左上角）；用于诊断与测试锚点是否稳定。 */
@@ -488,7 +501,9 @@ private fun ZoomableImage(
                     val change = event.changes.first()
                     val dy = change.scrollDelta.y
                     if (dy != 0f) {
-                        zoom.zoomAt(if (dy > 0) 1.15f else 1f / 1.15f, change.position)
+                        // 向上滚（scrollDelta.y 为负）= 放大，与主流看图软件一致；
+                        // 想反过来只需把这里的判断改成 dy > 0。
+                        zoom.zoomAt(if (dy < 0) 1.15f else 1f / 1.15f, change.position)
                     }
                 }
                 .pointerInput(Unit) {
