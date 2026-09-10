@@ -132,7 +132,7 @@ fun App(state: AppState, onToggleFullscreen: () -> Unit) {
             val items = ImageScanner.scanArchive(f, reader)
             if (items.isEmpty()) {
                 reader.close()
-                error = StringsKey.ArchiveEmpty.zh
+                error = strings.t(StringsKey.ArchiveEmpty)
                 return@launch
             }
             state.archiveReader?.close()
@@ -165,7 +165,7 @@ fun App(state: AppState, onToggleFullscreen: () -> Unit) {
                 val items = ImageScanner.scanArchive(f, reader)
                 if (items.isEmpty()) {
                     reader.close()
-                    error = StringsKey.ArchiveEmpty.zh
+                    error = strings.t(StringsKey.ArchiveEmpty)
                     return@launch
                 }
                 state.archiveReader = reader
@@ -208,7 +208,7 @@ fun App(state: AppState, onToggleFullscreen: () -> Unit) {
                 val items = ImageScanner.scanArchive(f, reader)
                 if (items.isEmpty()) {
                     reader.close()
-                    error = StringsKey.ArchiveEmpty.zh
+                    error = strings.t(StringsKey.ArchiveEmpty)
                     return@launch
                 }
                 state.archiveReader = reader
@@ -282,11 +282,9 @@ fun App(state: AppState, onToggleFullscreen: () -> Unit) {
         }
         return when (e.key) {
             Key.Escape -> { state.closeViewer(); true }
-            Key.DirectionRight -> { state.selectedIndex = (state.selectedIndex + 1) % state.images.size; true }
-            Key.DirectionLeft -> {
-                state.selectedIndex = (state.selectedIndex - 1 + state.images.size) % state.images.size
-                true
-            }
+            // 翻页只在「搜索过滤后的可见列表」内移动，避免跳到被过滤掉的图片。
+            Key.DirectionRight -> { state.selectedIndex = state.step(1); true }
+            Key.DirectionLeft -> { state.selectedIndex = state.step(-1); true }
             Key.Delete -> { deleteCurrent(); true }
             Key.I -> { state.showInfo = !state.showInfo; true }
             Key.Spacebar -> { state.slideshow = !state.slideshow; true }
@@ -299,8 +297,11 @@ fun App(state: AppState, onToggleFullscreen: () -> Unit) {
         state.images = sortImages(state.images, state.sortMode, state.sortDirection)
     }
 
-    // 翻页时自动保存书架进度。
+    // 翻页时更新书架进度：延迟合并写盘，避免连续翻页 / 幻灯片每换一张就写一次书架 JSON。
+    // LaunchedEffect 的 key 变化会取消上一个协程，所以只有停下来 0.8s 后才真正落盘。
     LaunchedEffect(state.selectedIndex) {
+        if (state.selectedIndex < 0) return@LaunchedEffect
+        delay(800)
         state.updateProgress()
     }
 
@@ -308,7 +309,7 @@ fun App(state: AppState, onToggleFullscreen: () -> Unit) {
     LaunchedEffect(state.slideshow, state.selectedIndex) {
         while (state.slideshow && state.images.isNotEmpty()) {
             delay((state.slideshowSeconds * 1000).toLong())
-            state.selectedIndex = (state.selectedIndex + 1) % state.images.size
+            state.selectedIndex = state.step(1)
         }
     }
 
@@ -337,8 +338,8 @@ fun App(state: AppState, onToggleFullscreen: () -> Unit) {
                     item = current,
                     index = state.selectedIndex,
                     total = state.images.size,
-                    onPrev = { state.selectedIndex = (state.selectedIndex - 1 + state.images.size) % state.images.size },
-                    onNext = { state.selectedIndex = (state.selectedIndex + 1) % state.images.size },
+                    onPrev = { state.selectedIndex = state.step(-1) },
+                    onNext = { state.selectedIndex = state.step(1) },
                     onClose = { state.closeViewer() },
                     onDelete = { deleteCurrent() },
                     onToggleInfo = { state.showInfo = !state.showInfo },
@@ -372,8 +373,10 @@ fun App(state: AppState, onToggleFullscreen: () -> Unit) {
                     onRefresh = { refresh() },
                     onImageClick = { state.open(it) },
                     onSlideshow = {
-                        if (state.images.isNotEmpty()) {
-                            state.selectedIndex = 0
+                        // 从「当前可见列表」的第一张开始播放。
+                        val first = state.firstVisibleIndex()
+                        if (first >= 0) {
+                            state.selectedIndex = first
                             state.slideshow = true
                         }
                     },

@@ -69,6 +69,15 @@ fun formatBytes(bytes: Long): String {
     return "%.2f GB".format(mb / 1024.0)
 }
 
+/**
+ * 按文件名过滤（大小写不敏感，忽略首尾空白）；[query] 为空时返回原列表。
+ * 网格显示（GalleryScreen）与查看器翻页（AppState.step）都走这里，保证两者顺序一致。
+ */
+fun filterImages(images: List<ImageItem>, query: String): List<ImageItem> {
+    val q = query.trim()
+    return if (q.isEmpty()) images else images.filter { it.name.contains(q, ignoreCase = true) }
+}
+
 fun sortImages(list: List<ImageItem>, mode: SortMode, direction: SortDirection): List<ImageItem> {
     val base = when (mode) {
         SortMode.NAME -> list.sortedBy { it.name.lowercase() }

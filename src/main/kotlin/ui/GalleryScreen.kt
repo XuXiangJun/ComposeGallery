@@ -104,7 +104,8 @@ fun GalleryScreen(
 ) {
     val s = LocalStrings.current
     val query = searchQuery.trim()
-    val visible = if (query.isEmpty()) images else images.filter { it.name.contains(query, ignoreCase = true) }
+    // 与 AppState.step 共用同一套过滤规则（trim + 忽略大小写），保证网格显示顺序与查看器翻页顺序一致。
+    val visible = gallery.filterImages(images, query)
 
     Column(
         Modifier

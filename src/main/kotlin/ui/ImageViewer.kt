@@ -317,13 +317,17 @@ private fun BoxScope.ViewerBottomBar(
         IconButton(onClick = onOpenInFolder) {
             Icon(Icons.Filled.Search, s.t(StringsKey.OpenInFolder), tint = ViewerIcon)
         }
+        // 拖动过程中只更新本地状态，松手（onValueChangeFinished）才回调上层 —— 上层会写盘，
+        // 这样避免滑块每移动一格就写一次 settings.json。
+        var sliderValue by remember(slideshowSeconds) { mutableStateOf(slideshowSeconds) }
         Slider(
-            value = slideshowSeconds,
-            onValueChange = onSlideshowSecondsChange,
+            value = sliderValue,
+            onValueChange = { sliderValue = it },
             valueRange = 1f..10f,
+            onValueChangeFinished = { onSlideshowSecondsChange(sliderValue) },
             modifier = Modifier.width(90.dp),
         )
-        Text(s.t(StringsKey.Interval, slideshowSeconds.toInt()), color = ViewerIcon, fontSize = 12.sp)
+        Text(s.t(StringsKey.Interval, sliderValue.toInt()), color = ViewerIcon, fontSize = 12.sp)
         IconButton(onClick = onDelete, enabled = canDelete) {
             Icon(Icons.Filled.Delete, s.t(StringsKey.Delete), tint = if (canDelete) ViewerIcon else ViewerDim)
         }

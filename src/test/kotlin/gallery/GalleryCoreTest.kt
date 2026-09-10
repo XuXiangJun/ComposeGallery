@@ -90,6 +90,48 @@ class GalleryCoreTest {
         assertEquals(book, back[0])
     }
 
+    private fun item(name: String) = ImageItem(FileSource(File(tmpDir, name)), name, 1024L, 0L)
+
+    @Test
+    fun filterImagesTrimsAndIgnoresCase() {
+        val list = listOf(item("Cat.jpg"), item("dog.png"), item("catalog.gif"))
+        assertEquals(list, filterImages(list, ""))
+        assertEquals(list, filterImages(list, "   "), "纯空白查询应视为无过滤")
+        assertEquals(listOf(list[0], list[2]), filterImages(list, "CAT"))
+        assertEquals(emptyList<ImageItem>(), filterImages(list, "zzz"))
+    }
+
+    @Test
+    fun stepSkipsFilteredOutImages() {
+        val state = AppState()
+        state.images = listOf(item("Cat.jpg"), item("dog.png"), item("catalog.gif"))
+
+        // 无搜索：在整个列表里循环（step 是纯函数，不修改 selectedIndex）
+        state.selectedIndex = 2
+        assertEquals(0, state.step(1), "末尾回绕到第一张")
+        assertEquals(1, state.step(-1), "往前一张")
+
+        // 有搜索：只在可见项（索引 0 与 2）之间移动，跳过被过滤掉的 dog.png
+        state.searchQuery = "c"
+        state.selectedIndex = 0
+        assertEquals(2, state.step(1), "跳过被过滤掉的 dog.png")
+        assertEquals(0, state.firstVisibleIndex())
+
+        state.selectedIndex = 2
+        assertEquals(0, state.step(1), "末尾回绕到第一张可见项")
+        assertEquals(0, state.step(-1), "从第一张可见项往前回到末尾可见项")
+    }
+
+    @Test
+    fun stepKeepsPositionWhenOnlyOneVisible() {
+        val state = AppState()
+        state.images = listOf(item("a.jpg"), item("b.png"))
+        state.searchQuery = "a"
+        state.selectedIndex = 0
+        assertEquals(0, state.step(1))
+        assertEquals(0, state.step(-1))
+    }
+
     @Test
     fun animatedGifDecodesWithScalingAndLoopcount() {
         val gifFile = File(tmpDir, "anim.gif")

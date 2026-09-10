@@ -114,6 +114,35 @@ class AppState {
         persistSettings()
     }
 
+    // ---- 浏览顺序（考虑搜索过滤）----
+
+    /** 当前可见列表（搜索过滤后）第一张在 [images] 中的索引；没有可见图片时为 -1。 */
+    fun firstVisibleIndex(): Int {
+        if (images.isEmpty()) return -1
+        val q = searchQuery.trim()
+        return if (q.isEmpty()) 0 else images.indexOfFirst { it.name.contains(q, ignoreCase = true) }
+    }
+
+    /**
+     * 在「当前可见列表」（搜索过滤后）内移动 [delta] 步，返回新的 [images] 索引。
+     * 这样搜索状态下按 ←/→ 或跑幻灯片不会跳到被过滤掉的图片；[selectedIndex] 始终索引
+     * [images]，因此书架进度语义保持不变。
+     */
+    fun step(delta: Int): Int {
+        val all = images
+        if (all.isEmpty()) return -1
+        val q = searchQuery.trim()
+        if (q.isEmpty()) {
+            val base = if (selectedIndex in all.indices) selectedIndex else 0
+            return ((base + delta) % all.size + all.size) % all.size
+        }
+        val visible = filterImages(all, q)
+        if (visible.isEmpty()) return selectedIndex
+        val pos = visible.indexOf(all.getOrNull(selectedIndex))
+        val nextPos = if (pos < 0) 0 else ((pos + delta) % visible.size + visible.size) % visible.size
+        return all.indexOf(visible[nextPos])
+    }
+
     /** 打开某个位置后记录到「最近打开」，最多保留 8 条、按使用时间去重。 */
     fun addRecent(path: String, name: String, type: String) {
         val entry = RecentEntry(path, name, type, System.currentTimeMillis())
