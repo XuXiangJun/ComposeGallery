@@ -61,11 +61,6 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.input.key.Key
-import androidx.compose.ui.input.key.KeyEventType
-import androidx.compose.ui.input.key.key
-import androidx.compose.ui.input.key.onPreviewKeyEvent
-import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.input.pointer.pointerInput
@@ -87,6 +82,9 @@ import kotlinx.coroutines.isActive
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
+
+/** 信息面板的「修改时间」格式：复用同一实例，避免每次重组都 new（仅 UI 线程使用）。 */
+private val infoDateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss")
 
 class ZoomState {
     var scale by mutableStateOf(1f)
@@ -142,21 +140,14 @@ fun ImageViewer(
         focusRequester.requestFocus()
     }
 
+    // 键盘（←/→/Esc/Delete/I/空格/F11/F1）统一由 App 的 onPreviewKeyEvent 处理：
+    // 它在窗口根部、预览阶段最先拿到事件，这里再处理一遍只会是死代码。
     Box(
         Modifier
             .fillMaxSize()
             .background(Color.Black)
             .focusRequester(focusRequester)
-            .focusable()
-            .onPreviewKeyEvent { e ->
-                if (e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-                when (e.key) {
-                    Key.DirectionRight -> { onNext(); true }
-                    Key.DirectionLeft -> { onPrev(); true }
-                    Key.Escape -> { onClose(); true }
-                    else -> false
-                }
-            },
+            .focusable(),
     ) {
         val li = loadedImage
         val s = LocalStrings.current
@@ -350,10 +341,7 @@ private fun BoxScope.InfoPanel(item: ImageItem, loadedImage: LoadedImage?) {
             InfoRow(s.t(StringsKey.InfoDimensions), "${loadedImage?.width ?: 0} × ${loadedImage?.height ?: 0} px")
             InfoRow(s.t(StringsKey.InfoFileSize), formatBytes(item.sizeBytes))
             InfoRow(s.t(StringsKey.InfoPath), item.displayPath)
-            InfoRow(
-                s.t(StringsKey.InfoModified),
-                SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(Date(item.modified)),
-            )
+            InfoRow(s.t(StringsKey.InfoModified), infoDateFormat.format(Date(item.modified)))
         }
     }
 }

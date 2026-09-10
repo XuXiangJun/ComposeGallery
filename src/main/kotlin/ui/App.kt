@@ -106,87 +106,82 @@ fun App(state: AppState, onToggleFullscreen: () -> Unit) {
         }
     }
 
+    // ---- 打开位置：四个入口（工具栏 / 书架 / 最近打开）共用下面两个函数 ----
+
+    /**
+     * 打开压缩包并载入图片列表，成功返回 true。
+     * [resume] 是否恢复书架进度；[recordRecent] 是否记入「最近打开」。
+     */
+    suspend fun loadArchive(file: File, resume: Boolean, recordRecent: Boolean): Boolean {
+        val reader = try {
+            ArchiveReader.open(file)
+        } catch (t: Throwable) {
+            error = strings.t(StringsKey.OpenArchiveFailed, t.message ?: t.toString())
+            return false
+        }
+        val items = ImageScanner.scanArchive(file, reader)
+        if (items.isEmpty()) {
+            reader.close()
+            error = strings.t(StringsKey.ArchiveEmpty)
+            return false
+        }
+        state.archiveReader?.close()
+        state.archiveReader = reader
+        state.archive = file
+        state.folder = null
+        state.resumeFromBook = resume
+        state.searchQuery = ""
+        state.closeViewer()
+        state.images = sortImages(items, state.sortMode, state.sortDirection)
+        finishLoad()
+        if (recordRecent) state.addRecent(file.absolutePath, file.name, "archive")
+        return true
+    }
+
+    /** 打开文件夹并载入图片列表，成功返回 true。 */
+    suspend fun loadFolder(dir: File, resume: Boolean, recordRecent: Boolean): Boolean {
+        if (!dir.isDirectory) {
+            error = strings.t(StringsKey.FolderNotFound, dir.absolutePath)
+            return false
+        }
+        state.closeArchive()
+        state.folder = dir
+        state.resumeFromBook = resume
+        state.searchQuery = ""
+        state.closeViewer()
+        state.loading = true
+        try {
+            state.images = sortImages(ImageScanner.scan(dir, state.recursive), state.sortMode, state.sortDirection)
+        } finally {
+            state.loading = false
+        }
+        finishLoad()
+        if (recordRecent) state.addRecent(dir.absolutePath, dir.name, "folder")
+        return true
+    }
+
     fun openFolder() {
         scope.launch {
-            pickFolder()?.let { f ->
-                state.closeArchive()
-                state.resumeFromBook = false
-                state.folder = f
-                state.searchQuery = ""
-                state.closeViewer()
-                rescan()
-                state.addRecent(f.absolutePath, f.name, "folder")
-            }
+            pickFolder()?.let { loadFolder(it, resume = false, recordRecent = true) }
         }
     }
 
     fun openArchive() {
         scope.launch {
-            val f = pickArchive() ?: return@launch
-            val reader = try {
-                ArchiveReader.open(f)
-            } catch (t: Throwable) {
-                error = strings.t(StringsKey.OpenArchiveFailed, t.message ?: t.toString())
-                return@launch
-            }
-            val items = ImageScanner.scanArchive(f, reader)
-            if (items.isEmpty()) {
-                reader.close()
-                error = strings.t(StringsKey.ArchiveEmpty)
-                return@launch
-            }
-            state.archiveReader?.close()
-            state.archiveReader = reader
-            state.archive = f
-            state.folder = null
-            state.resumeFromBook = false
-            state.searchQuery = ""
-            state.closeViewer()
-            state.images = sortImages(items, state.sortMode, state.sortDirection)
-            finishLoad()
-            state.addRecent(f.absolutePath, f.name, "archive")
+            pickArchive()?.let { loadArchive(it, resume = false, recordRecent = true) }
         }
     }
 
     fun openBook(book: BookEntry) {
         scope.launch {
+            // 从书架进入：先关掉当前归档（并保存进度），再恢复这本书的阅读进度。
             state.closeArchive()
             state.showBookshelf = false
-            state.resumeFromBook = true
-            state.searchQuery = ""
             if (book.type == "archive") {
-                val f = File(book.path)
-                val reader = try {
-                    ArchiveReader.open(f)
-                } catch (t: Throwable) {
-                    error = strings.t(StringsKey.OpenArchiveFailed, t.message ?: t.toString())
-                    return@launch
-                }
-                val items = ImageScanner.scanArchive(f, reader)
-                if (items.isEmpty()) {
-                    reader.close()
-                    error = strings.t(StringsKey.ArchiveEmpty)
-                    return@launch
-                }
-                state.archiveReader = reader
-                state.archive = f
-                state.folder = null
-                state.images = sortImages(items, state.sortMode, state.sortDirection)
+                loadArchive(File(book.path), resume = true, recordRecent = false)
             } else {
-                val f = File(book.path)
-                if (!f.isDirectory) {
-                    error = strings.t(StringsKey.FolderNotFound, f.absolutePath)
-                    return@launch
-                }
-                state.folder = f
-                state.loading = true
-                try {
-                    state.images = sortImages(ImageScanner.scan(f, state.recursive), state.sortMode, state.sortDirection)
-                } finally {
-                    state.loading = false
-                }
+                loadFolder(File(book.path), resume = true, recordRecent = false)
             }
-            finishLoad()
         }
     }
 
@@ -195,41 +190,11 @@ fun App(state: AppState, onToggleFullscreen: () -> Unit) {
         scope.launch {
             state.closeArchive()
             state.showBookshelf = false
-            state.resumeFromBook = false
-            state.searchQuery = ""
             if (entry.type == "archive") {
-                val f = File(entry.path)
-                val reader = try {
-                    ArchiveReader.open(f)
-                } catch (t: Throwable) {
-                    error = strings.t(StringsKey.OpenArchiveFailed, t.message ?: t.toString())
-                    return@launch
-                }
-                val items = ImageScanner.scanArchive(f, reader)
-                if (items.isEmpty()) {
-                    reader.close()
-                    error = strings.t(StringsKey.ArchiveEmpty)
-                    return@launch
-                }
-                state.archiveReader = reader
-                state.archive = f
-                state.folder = null
-                state.images = sortImages(items, state.sortMode, state.sortDirection)
+                loadArchive(File(entry.path), resume = false, recordRecent = false)
             } else {
-                val f = File(entry.path)
-                if (!f.isDirectory) {
-                    error = strings.t(StringsKey.FolderNotFound, f.absolutePath)
-                    return@launch
-                }
-                state.folder = f
-                state.loading = true
-                try {
-                    state.images = sortImages(ImageScanner.scan(f, state.recursive), state.sortMode, state.sortDirection)
-                } finally {
-                    state.loading = false
-                }
+                loadFolder(File(entry.path), resume = false, recordRecent = false)
             }
-            finishLoad()
         }
     }
 

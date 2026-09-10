@@ -173,6 +173,13 @@ fun GalleryScreen(
     }
 }
 
+/** ThemeMode → 文案键的显式映射（不再用 StringsKey.valueOf(mode.name)，避免依赖枚举名与键名一致）。 */
+private fun themeModeKey(mode: ThemeMode): StringsKey = when (mode) {
+    ThemeMode.SYSTEM -> StringsKey.ThemeSystem
+    ThemeMode.LIGHT -> StringsKey.ThemeLight
+    ThemeMode.DARK -> StringsKey.ThemeDark
+}
+
 @Composable
 private fun Toolbar(
     folderName: String?,
@@ -385,7 +392,7 @@ private fun Toolbar(
                                             Spacer(Modifier.size(18.dp))
                                         }
                                         Spacer(Modifier.width(GalleryTokens.spacingS))
-                                        Text(s.t(StringsKey.valueOf(mode.name)))
+                                        Text(s.t(themeModeKey(mode)))
                                     }
                                 }
                             }
