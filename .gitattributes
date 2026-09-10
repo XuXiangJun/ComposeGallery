@@ -1,0 +1,23 @@
+# 行尾控制。
+#
+# shell / wrapper 脚本必须是 LF：若被检成 CRLF，在 Linux / macOS / WSL / Git-Bash
+# 上执行 ./gradlew 会报 "bad interpreter: /bin/sh^M"。本机 core.autocrlf=true，
+# 没有下面这几条规则时 Windows 检出就会把 gradlew 转成 CRLF，所以在仓库里固定住。
+# 具体规则写在后面，覆盖前面的 * text=auto。
+* text=auto
+
+gradlew   text eol=lf
+*.sh      text eol=lf
+*.bat     text eol=crlf
+*.ps1     text eol=crlf
+
+# 二进制资源，禁止任何行尾转换
+*.jar     binary
+*.ico     binary
+*.icns    binary
+*.png     binary
+*.jpg     binary
+*.jpeg    binary
+*.gif     binary
+*.webp    binary
+*.zip     binary

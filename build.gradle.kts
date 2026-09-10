@@ -13,6 +13,12 @@ plugins {
 group = "com.example"
 version = "1.0.0"
 
+// 平台判定：jpackage 的可执行文件名、图标格式与分发包格式在各 OS 上不同。
+val osName = System.getProperty("os.name").lowercase()
+val isWindows = osName.startsWith("windows")
+val isMac = osName.startsWith("mac") || osName.startsWith("darwin")
+val isLinux = !isWindows && !isMac
+
 repositories {
     mavenCentral()
     google()
@@ -120,7 +126,12 @@ compose.desktop {
         mainClass = "gallery.MainKt"
 
         nativeDistributions {
-            targetFormats(TargetFormat.Msi)
+            // 分发包格式按平台选择：Windows -> MSI，macOS -> DMG，其余（Linux）-> DEB。
+            when {
+                isWindows -> targetFormats(TargetFormat.Msi)
+                isMac -> targetFormats(TargetFormat.Dmg)
+                else -> targetFormats(TargetFormat.Deb)
+            }
             packageName = "ComposeGallery"
             packageVersion = "1.0.0"
             description = "Compose Gallery - image viewer & comic bookshelf"
@@ -128,6 +139,12 @@ compose.desktop {
             windows {
                 iconFile.set(project.file("src/main/resources/icon.ico"))
             }
+            // TODO(macOS)：DMG 需要 .icns，仓库暂无该资源（app-image/zip 打包时已按平台跳过 --icon）。
+            //   备好 src/main/resources/icon.icns 后打开下面一行：
+            //   macOS { iconFile.set(project.file("src/main/resources/icon.icns")) }
+            // TODO(Linux)：DEB 需要 512x512 PNG 图标，仓库暂无该资源。
+            //   备好 src/main/resources/icon.png 后打开下面一行：
+            //   linux { iconFile.set(project.file("src/main/resources/icon.png")) }
         }
     }
 }
@@ -164,15 +181,19 @@ val packageZip = tasks.register("packageZip") {
 
         // 用 Gradle 运行 JDK 里的 jpackage（JAVA_HOME 需为含 jpackage 的 JDK，避免硬编码本机路径）。
         val jpHome = File(System.getProperty("java.home"))
-        val jpackage = File(jpHome, "bin/jpackage.exe").absolutePath
+        // Windows 上是 jpackage.exe，Linux / macOS 上是无扩展名的 jpackage。
+        val jpackageName = if (isWindows) "jpackage.exe" else "jpackage"
+        val jpackage = File(jpHome, "bin/$jpackageName").absolutePath
         val runtimeImage = File(buildDirFile, "compose/tmp/main/runtime")
         val destDir = File(buildDirFile, "compose/binaries/main/app")
         destDir.mkdirs()
         val appName = "ComposeGallery"
+        // macOS 的 app-image 是 ComposeGallery.app 目录，Windows / Linux 是无扩展名的同名目录。
+        val appImageDirName = if (isMac) "$appName.app" else appName
         // 清理上次生成的 app image，否则 jpackage 会因目录已存在而失败
-        File(destDir, appName).deleteRecursively()
+        File(destDir, appImageDirName).deleteRecursively()
 
-        val pb = ProcessBuilder(
+        val jpackageArgs = mutableListOf(
             jpackage,
             "--type", "app-image",
             "--input", libsDir.absolutePath,
@@ -183,11 +204,16 @@ val packageZip = tasks.register("packageZip") {
             "--app-version", version.toString(),
             "--vendor", "Compose Gallery",
             "--description", "Compose Gallery - image viewer & comic bookshelf",
-            "--icon", File(projectDir, "src/main/resources/icon.ico").absolutePath,
             "--dest", destDir.absolutePath,
             "--java-options", "-Dskiko.library.path=\$APPDIR",
             "--java-options", "-Dcompose.application.configure.swing.globals=true",
         )
+        // --icon 只在 Windows 上传：macOS 的 app-image 只接受 .icns（仓库暂无），
+        // Linux 的 app-image 不使用图标参数。
+        if (isWindows) {
+            jpackageArgs += listOf("--icon", File(projectDir, "src/main/resources/icon.ico").absolutePath)
+        }
+        val pb = ProcessBuilder(jpackageArgs)
         pb.redirectErrorStream(true)
         pb.redirectOutput(ProcessBuilder.Redirect.INHERIT)
         val proc = pb.start()
@@ -195,7 +221,7 @@ val packageZip = tasks.register("packageZip") {
         check(code == 0) { "jpackage app-image failed with exit $code" }
 
         // 打包成 zip
-        val appDir = File(destDir, appName)
+        val appDir = File(destDir, appImageDirName)
         val zipFile = File(destDir, "ComposeGallery-${version}.zip")
         ZipOutputStream(zipFile.outputStream()).use { zos ->
             appDir.walkTopDown().forEach { f ->

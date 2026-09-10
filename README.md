@@ -23,8 +23,8 @@
 
 ## 技术栈
 
-- Kotlin 2.1.21 · Compose Multiplatform 1.8.2 · Gradle 8.14.2 · JDK 21（Temurin 21.0.12）
-- 图片解码/缩放使用 Skia（skiko），解码时自动应用 EXIF 方向
+- Kotlin 2.4.20 · Compose Multiplatform 1.12.0 · Gradle 9.7.1 · JDK 21（Temurin 21.0.12）
+- 图片解码/缩放使用 Skia（skiko），解码时自动应用 EXIF 方向；`compose.desktop.currentOs` 会按当前平台自动解析原生依赖，因此 Windows / Linux / macOS 共用同一份源码
 - 压缩包读取：Apache Commons Compress 1.28.0（zip + 7z，zip 条目名自动检测 UTF-8 / GB18030 编码）
 
 ## 运行
@@ -32,26 +32,47 @@
 ### 其他电脑（新克隆项目）
 
 你需要自己安装 **JDK 21**（并设置好 `JAVA_HOME`，项目用 `jvmToolchain(21)`）。
-**无需手动装 Gradle**——项目自带 Gradle Wrapper，首次运行会自动下载 Gradle 8.14.2；
+**无需手动装 Gradle**——项目自带 Gradle Wrapper，首次运行会自动下载 Gradle 9.7.1；
 依赖会从 Maven Central 自动下载。
 
-```powershell
-# Windows（项目根目录下）
-.\gradlew.bat run          # 启动
-.\gradlew.bat test         # 跑测试
-.\gradlew.bat packageMsi   # 打 MSI（需联网下载 WiX）
-.\gradlew.bat packageZip   # 打免安装 zip
+Windows / Linux / macOS 用的是同一套 wrapper，命令一致（Windows 上是 `gradlew.bat`）：
 
-# macOS / Linux 用 ./gradlew ...
+```bash
+# macOS / Linux
+./gradlew run          # 启动
+./gradlew test         # 跑测试
+./gradlew packageZip   # 打免安装 zip
 ```
+
+```powershell
+# Windows PowerShell
+.\gradlew.bat run
+.\gradlew.bat test
+.\gradlew.bat packageZip
+```
+
+分发包按平台生成（`build.gradle.kts` 里的 `targetFormats` 会按当前 OS 自动选择）：
+
+| 平台 | 命令 | 产物 | 备注 |
+| --- | --- | --- | --- |
+| Windows | `.\gradlew.bat packageMsi` | `build/compose/binaries/main/msi/ComposeGallery-1.0.0.msi` | 首次运行自动联网下载 WiX 3 |
+| Linux | `./gradlew packageDeb` | `build/compose/binaries/main/deb/*.deb` | 需要系统里有 `dpkg-deb`（多数发行版自带） |
+| macOS | `./gradlew packageDmg` | `build/compose/binaries/main/dmg/*.dmg` | 用系统自带 `hdiutil` |
+| 任意平台 | `./gradlew packageZip` | `build/compose/binaries/main/app/ComposeGallery-1.0.0.zip` | 免安装，jpackage `app-image` 后打包 |
+
+> macOS 的 `.dmg` 与 Linux 的 `.deb` 图标尚未提供（仓库里只有 Windows 的 `icon.ico`）。
+> 备好 `src/main/resources/icon.icns`（macOS）或 `src/main/resources/icon.png`（Linux，建议 512×512）后，
+> 打开 `build.gradle.kts` 中 `nativeDistributions` 里的对应 TODO 注释即可启用。
+> `packageZip` 在 macOS 上会跳过 `--icon`（jpackage 的 app-image 在 macOS 只接受 `.icns`），
+> 且 macOS 的 `.app` 内含符号链接，若在 macOS 上打 zip 分发需另行验证一遍。
 
 > 说明：`packageMsi` 在普通 Windows 上能正常做 ICE 校验；`wrapWixLight` 的 light.exe
 > 包装器只在沙箱环境（WiX 缓存存在）时启用，普通机器会自动跳过。
 
 ### 本机沙箱环境
 
-本机使用封装好的 `build.ps1`（固定 JDK 21 / Gradle 路径，并把缓存、临时目录、skiko 解压目录
-重定向到 `D:\ai\.tools`，规避沙箱对 `C:\Users\...` 的写入限制）：
+本机使用封装好的 `build.ps1`（固定 JDK 21、把缓存 / 临时目录 / skiko 解压目录重定向到
+`D:\ai\.tools`，规避沙箱对 `C:\Users\...` 的写入限制，然后调用项目自带的 Gradle wrapper）：
 
 ```powershell
 & D:\ai\gallery\build.ps1 run          # 启动
@@ -61,6 +82,9 @@
 # 产物：build\compose\binaries\main\msi\ComposeGallery-1.0.0.msi
 #       build\compose\binaries\main\app\ComposeGallery-1.0.0.zip
 ```
+
+`build.ps1` 里的 `JAVA_HOME` / `GRADLE_USER_HOME` / `TMP` 只有在对应沙箱目录存在时才生效，
+所以在普通 Windows 机器上直接用 `.\gradlew.bat` 也可以，不会被这些路径影响。
 
 ### 打包说明
 
@@ -77,10 +101,10 @@ WiX 3（约 34 MB，缓存在 `D:\ai\.tools\gradle-home\compose-jb\wix311.zip`�
 等价的手工命令（`build.ps1` 内部做的事）：
 
 ```powershell
-$env:JAVA_HOME = "D:\ai\.tools\jdk21\jdk-21.0.12+8"
+$env:JAVA_HOME = "D:\ai\.tools\jdk21\jdk-21.0.12+8"   # 沙箱内 JDK；普通机器用自己装的 JDK 21
 $env:GRADLE_USER_HOME = "D:\ai\.tools\gradle-home"
 $env:TMP = $env:TEMP = "D:\ai\.tools\tmp"
-D:\ai\.tools\gradle-8.14.2\bin\gradle.bat -p D:\ai\gallery run
+D:\ai\gallery\gradlew.bat -p D:\ai\gallery run
 ```
 
 ## 操作说明
@@ -97,8 +121,9 @@ D:\ai\.tools\gradle-8.14.2\bin\gradle.bat -p D:\ai\gallery run
 
 ```
 gallery/
-├── build.gradle.kts          # 构建脚本（含 JUnit5 测试 + 沙箱临时目录重定向 + 打包）
-├── build.ps1                 # 一键构建/运行辅助脚本
+├── build.gradle.kts          # 构建脚本（平台判定 + JUnit5 测试 + 沙箱临时目录重定向 + 打包）
+├── build.ps1                 # Windows 辅助脚本（沙箱路径 + 调用 gradlew）
+├── .gitattributes            # 行尾规则（gradlew/*.sh 固定 LF，*.bat/*.ps1 固定 CRLF）
 ├── settings.gradle.kts
 ├── gradle.properties
 └── src/main/kotlin/
@@ -111,7 +136,7 @@ gallery/
     ├── ImageScanner.kt       # 目录/归档扫描
     ├── ImageLoader.kt        # Skia 解码 + 缩放 + 缩略图缓存
     ├── FileOps.kt            # 打开文件夹/压缩包/回收站/文件管理器
-    ├── resources/icon.ico    # 应用图标
+    ├── resources/icon.ico    # 应用图标（Windows；macOS/Linux 图标待补，见「运行」一节）
     ├── packaging/
     │   └── LightWrapper.cs   # WiX light.exe 包装器（跳过 ICE 校验，沙箱打包用）
     └── ui/
