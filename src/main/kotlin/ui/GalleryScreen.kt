@@ -516,7 +516,8 @@ private fun EmptyState(
                 Spacer(Modifier.height(GalleryTokens.spacingXl))
                 Text(s.t(StringsKey.Recent), color = colors.onSurfaceMuted, fontSize = GalleryTokens.textSmall)
                 Spacer(Modifier.height(GalleryTokens.spacingS))
-                recent.take(6).forEach { entry ->
+                // 显示全部：AppState 已把「最近打开」限制在 8 条以内，这里再截断只会让两处不一致。
+                recent.forEach { entry ->
                     Row(
                         Modifier
                             .clip(RoundedCornerShape(6.dp))

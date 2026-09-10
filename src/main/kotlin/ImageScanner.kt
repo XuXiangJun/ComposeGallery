@@ -37,7 +37,9 @@ object ImageScanner {
                                 if (children != null) {
                                     for (f in children) {
                                         when {
-                                            f.isDirectory -> {
+                                            // 不跟随符号链接目录：避免目录环导致递归无限展开，
+                                            // 也与多数扫描工具（Files.walk 默认不跟随）保持一致。
+                                            f.isDirectory && !java.nio.file.Files.isSymbolicLink(f.toPath()) -> {
                                                 pending.incrementAndGet()
                                                 queue.trySend(f)
                                             }

@@ -49,12 +49,18 @@ import gallery.moveToTrash
 import gallery.pickArchive
 import gallery.pickFolder
 import gallery.sortImages
+import java.awt.Component
 import java.io.File
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 @Composable
-fun App(state: AppState, onToggleFullscreen: () -> Unit) {
+fun App(
+    state: AppState,
+    onToggleFullscreen: () -> Unit,
+    /** 文件对话框的父窗口（ComposeWindow 即 AWT Component）；为 null 时对话框不附着主窗口。 */
+    dialogParent: Component? = null,
+) {
     val scope = rememberCoroutineScope()
     val focusRequester = remember { FocusRequester() }
     var pendingDelete by remember { mutableStateOf<ImageItem?>(null) }
@@ -162,13 +168,13 @@ fun App(state: AppState, onToggleFullscreen: () -> Unit) {
 
     fun openFolder() {
         scope.launch {
-            pickFolder()?.let { loadFolder(it, resume = false, recordRecent = true) }
+            pickFolder(dialogParent)?.let { loadFolder(it, resume = false, recordRecent = true) }
         }
     }
 
     fun openArchive() {
         scope.launch {
-            pickArchive()?.let { loadArchive(it, resume = false, recordRecent = true) }
+            pickArchive(dialogParent)?.let { loadArchive(it, resume = false, recordRecent = true) }
         }
     }
 

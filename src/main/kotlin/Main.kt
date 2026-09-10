@@ -37,6 +37,9 @@ fun main() = application {
                     if (windowState.placement == WindowPlacement.Fullscreen) WindowPlacement.Floating
                     else WindowPlacement.Fullscreen
             },
+            // ComposeWindow 就是 AWT Component：作为文件对话框的 parent，
+            // 让它附着在主窗口上而不是变成孤立的顶层窗口。
+            dialogParent = window,
         )
     }
 }
