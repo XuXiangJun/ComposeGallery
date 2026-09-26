@@ -1,6 +1,5 @@
 package gallery
 
-import com.google.gson.GsonBuilder
 import com.google.gson.reflect.TypeToken
 import java.io.File
 import java.util.Locale
@@ -47,25 +46,19 @@ data class Settings(
 }
 
 object SettingsStore {
-    private val gson = GsonBuilder().setPrettyPrinting().create()
     private val type = object : TypeToken<Settings>() {}.type
 
-    val dir: File = File(System.getProperty("user.home"), ".ComposeGallery")
-    val file: File = File(dir, "settings.json")
+    val dir: File get() = JsonStore.dir
+    val file: File get() = JsonStore.file("settings.json")
 
-    fun load(): Settings = try {
-        if (!file.exists()) Settings()
-        else gson.fromJson(file.readText(), type) ?: Settings()
-    } catch (_: Throwable) {
-        Settings()
-    }
-
-    fun save(settings: Settings) {
-        try {
-            dir.mkdirs()
-            file.writeText(gson.toJson(settings))
+    fun load(): Settings {
+        val text = JsonStore.read("settings.json") ?: return Settings()
+        return try {
+            JsonStore.gson.fromJson(text, type) ?: Settings()
         } catch (_: Throwable) {
-            // 沙箱或权限问题下静默失败（设置仅本次会话有效）
+            Settings()
         }
     }
+
+    fun save(settings: Settings) = JsonStore.write("settings.json", JsonStore.gson.toJson(settings))
 }

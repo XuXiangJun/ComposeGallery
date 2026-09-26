@@ -74,6 +74,7 @@ enum class StringsKey(val zh: String, val en: String) {
 
     // Viewer
     Loading("加载中…", "Loading…"),
+    LoadFailed("无法解码这张图片", "Unable to decode this image"),
     LoadAnimationFailed("无法解码此动画", "Unable to decode this animation"),
     Prev("上一张", "Previous"),
     Next("下一张", "Next"),

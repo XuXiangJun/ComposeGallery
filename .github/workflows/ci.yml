@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # 单元测试覆盖解码 / 缩放 / 并行扫描 / GIF / 持久化，无头即可跑，不需要显示器。
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'   # 与 build.gradle.kts 的 jvmToolchain(21) 一致
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # 用 bash：Windows runner 默认 shell 是 pwsh，那边要写 gradlew.bat。
+      - name: Test
+        shell: bash
+        run: ./gradlew test --stacktrace
+
+      - name: Upload test report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-report-${{ matrix.os }}
+          path: build/reports/tests/test/
+          if-no-files-found: ignore
+
+  # 打包是跨平台声明最容易被悄悄破坏的地方（jpackage / jlink / 图标 / targetFormats），
+  # 所以单独跑一遍免安装 zip：只用 JDK 自带的 jpackage，不需要联网下载 WiX。
+  package:
+    name: packageZip (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        # macOS 暂不纳入：README 已注明 .app 内含符号链接、macOS 打包路径尚未验证过。
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Package
+        shell: bash
+        run: ./gradlew packageZip --stacktrace
+
+      - name: Upload distribution
+        uses: actions/upload-artifact@v4
+        with:
+          name: composegallery-zip-${{ matrix.os }}
+          path: build/compose/binaries/main/app/*.zip
+          if-no-files-found: error

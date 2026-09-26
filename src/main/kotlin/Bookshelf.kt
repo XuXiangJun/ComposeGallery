@@ -1,6 +1,5 @@
 package gallery
 
-import com.google.gson.GsonBuilder
 import com.google.gson.reflect.TypeToken
 import java.io.File
 
@@ -21,25 +20,20 @@ data class BookEntry(
 )
 
 object BookshelfStore {
-    private val gson = GsonBuilder().setPrettyPrinting().create()
     private val listType = object : TypeToken<List<BookEntry>>() {}.type
 
-    val dir: File = File(System.getProperty("user.home"), ".ComposeGallery")
-    val file: File = File(dir, "bookshelf.json")
+    val dir: File get() = JsonStore.dir
+    val file: File get() = JsonStore.file("bookshelf.json")
 
-    fun load(): List<BookEntry> = try {
-        if (!file.exists()) emptyList()
-        else gson.fromJson(file.readText(), listType) ?: emptyList()
-    } catch (_: Throwable) {
-        emptyList()
-    }
-
-    fun save(books: List<BookEntry>) {
-        try {
-            dir.mkdirs()
-            file.writeText(gson.toJson(books))
+    fun load(): List<BookEntry> {
+        val text = JsonStore.read("bookshelf.json") ?: return emptyList()
+        return try {
+            JsonStore.gson.fromJson(text, listType) ?: emptyList()
         } catch (_: Throwable) {
-            // 沙箱或权限问题下静默失败（书架仅本次会话有效）
+            // 文件损坏时退化成空书架，而不是让应用起不来。
+            emptyList()
         }
     }
+
+    fun save(books: List<BookEntry>) = JsonStore.write("bookshelf.json", JsonStore.gson.toJson(books))
 }

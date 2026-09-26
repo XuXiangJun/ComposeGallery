@@ -10,6 +10,19 @@ plugins {
     id("org.jetbrains.compose") version "1.12.0"
 }
 
+// 受限环境（沙箱）的构建辅助逻辑不参与默认构建路径：临时目录重定向、WiX light.exe 包装等
+// 都指向某台沙箱主机，放在这里意味着每个 clone 仓库的人都要继承它们。默认构建在任何机器上
+// 都应可复现。需要时显式开启：
+//   ./gradlew -Psandbox packageMsi       （macOS / Linux）
+//   .\gradlew.bat -Psandbox packageMsi   （Windows）
+//   GRADLE_SANDBOX=1 与 -Psandbox 等效
+// 详见 gradle/sandbox.gradle.kts 顶部的说明。
+val sandboxBuild = providers.gradleProperty("sandbox").isPresent ||
+    System.getenv("GRADLE_SANDBOX") == "1"
+if (sandboxBuild) {
+    apply(from = "gradle/sandbox.gradle.kts")
+}
+
 group = "com.example"
 version = "1.0.0"
 
@@ -27,8 +40,8 @@ repositories {
 
 dependencies {
     implementation(compose.desktop.currentOs)
-    implementation(compose.material)
-    implementation(compose.material3)
+    implementation("org.jetbrains.compose.material:material:1.12.0")
+    implementation("org.jetbrains.compose.material3:material3:1.9.0")
     implementation("org.jetbrains.compose.material:material-icons-core:1.7.3")
     implementation("org.apache.commons:commons-compress:1.28.0")
     implementation("com.google.code.gson:gson:2.14.0")
@@ -48,83 +61,6 @@ kotlin {
 
 tasks.test {
     useJUnitPlatform()
-}
-
-// Wrap WiX light.exe so it appends "-sval" (skip ICE validation). ICE validation
-// requires the Windows Installer Service, which is unavailable in the sandbox and
-// makes light.exe exit with 216. Runs after unzipWix, before packageMsi.
-//
-// 注意：configuration cache 不允许任务执行期访问 project / gradle，
-// 所以这里把需要的路径都在配置期抓成普通值。
-val wrapWixLight = tasks.register("wrapWixLight") {
-    group = "build"
-    description = "Wrap WiX light.exe to skip ICE validation"
-    dependsOn("unzipWix")
-
-    val wixDir = file("build/wix311")
-    val lightExe = File(wixDir, "light.exe")
-    val realDir = File(wixDir, "real")
-    // WiX 缓存位置跟随实际的 GRADLE_USER_HOME（compose 插件把 WiX 下到这里）。
-    val wixZip = File(gradle.gradleUserHomeDir, "compose-jb/wix311.zip")
-    val wrapperSrc = file("packaging/LightWrapper.cs")
-    val csc = "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe"
-
-    doLast {
-        if (!lightExe.exists()) {
-            logger.lifecycle("light.exe missing; skipping wrapper install")
-            return@doLast
-        }
-        // 非沙箱机器：WiX 缓存不在本机路径，且 ICE 校验通常能通过，跳过包装。
-        if (!wixZip.exists()) {
-            logger.lifecycle("wix311.zip not found (non-sandbox); skipping light.exe wrapper - ICE validation should pass normally")
-            return@doLast
-        }
-
-        // Extract the full original WiX toolset into real/ — light.exe depends on
-        // several sibling DLLs, not just wix.dll, and must keep its original name.
-        realDir.mkdirs()
-        ZipFile(wixZip).use { zf ->
-            val entries = zf.entries()
-            while (entries.hasMoreElements()) {
-                val e = entries.nextElement()
-                if (e.isDirectory) continue
-                val target = File(realDir, e.name)
-                target.parentFile?.mkdirs()
-                zf.getInputStream(e).use { input ->
-                    target.outputStream().use { output ->
-                        val buf = ByteArray(8192)
-                        var n = input.read(buf)
-                        while (n > 0) {
-                            output.write(buf, 0, n)
-                            n = input.read(buf)
-                        }
-                    }
-                }
-            }
-        }
-
-        // Overwrite build/wix311/light.exe with the wrapper.
-        val pb = ProcessBuilder(csc, "/nologo", "/out:${lightExe.absolutePath}", wrapperSrc.absolutePath)
-        pb.redirectErrorStream(true)
-        pb.redirectOutput(ProcessBuilder.Redirect.INHERIT)
-        val proc = pb.start()
-        val code = proc.waitFor()
-        check(code == 0) { "csc failed with exit code $code" }
-        logger.lifecycle("light.exe wrapper installed")
-    }
-}
-
-// The DSH sandbox's default temp dir may not exist by the time a child JVM starts,
-// The DSH sandbox may not have a writable default temp dir and blocks user.home/.skiko.
-// Only redirect when the sandbox workspace dir exists; on normal machines use defaults.
-tasks.withType<JavaExec>().configureEach {
-    val sandboxTmp = File("D:\\ai\\.tools\\tmp")
-    if (sandboxTmp.exists()) {
-        systemProperty("java.io.tmpdir", sandboxTmp.absolutePath)
-        systemProperty("skiko.data.path", "D:\\ai\\.tools\\skiko")
-        environment("TMP", sandboxTmp.absolutePath)
-        environment("TEMP", sandboxTmp.absolutePath)
-    }
 }
 
 compose.desktop {
@@ -155,15 +91,10 @@ compose.desktop {
     }
 }
 
-// packageMsi 任务由 compose.desktop 块惰性创建，用 matching 惰性匹配。
-tasks.matching { it.name == "packageMsi" }.configureEach {
-    dependsOn(wrapWixLight)
-}
-
 // packageZip 里的 jpackage 取自 toolchain 指定的 JDK 21：Gradle daemon 可能跑在系统其它 JDK
 // （例如 JDK 25）上，而 runtime image 是由 toolchain 21 生成的，JDK 不匹配时 jpackage 会失败（exit 1）。
 val jdk21Launcher = javaToolchains.launcherFor {
-    languageVersion.set(org.gradle.jvm.toolchain.JavaLanguageVersion.of(21))
+    languageVersion.set(JavaLanguageVersion.of(21))
 }
 
 // 免安装 zip 版：jpackage --type app-image（不需要 WiX），再打包成 zip。

@@ -21,6 +21,7 @@
 - 本地缩略图内存缓存（Skia 解码 + 双线性缩放）
 
 > 说明：zip 和 7z 都用 Apache Commons Compress 读取（它比 JDK 自带的 `ZipFile` 宽容，能打开 GBK/Shift-JIS 等中文/日文条目名的压缩包，避免 JDK 的 "invalid CEN header" 报错）；rar 暂不支持（纯 Java 下 RAR5 解压支持不佳）。压缩包内的图片只读，不提供删除。
+> zip 条目名的编码是**探测**出来的：先按 UTF-8 打开，再把条目名的原始字节（`rawName`）做一次严格 UTF-8 解码，失败才改用 GB18030 重开。之所以不看解码后的字符，是因为 commons-compress 把畸形 UTF-8 字节解成 `?`（合法文件名字符，会误判），而且畸形字节还可能恰好拼成合法 UTF-8。
 
 ## 技术栈
 
@@ -96,12 +97,29 @@ $env:GRADLE_USER_HOME = "D:\gradle-home"; $env:TMP = $env:TEMP = "D:\tmp"; .\gra
 `packageMsi` 用 JDK 自带的 jpackage + jlink + WiX 生成 MSI。首次运行会自动联网下载
 WiX 3（约 34 MB，缓存到 Gradle 用户目录下的 `compose-jb/wix311.zip`）。
 
-> 沙箱内打包的一个特殊处理：WiX 的 `light.exe` 做 ICE 校验时需要访问 Windows
-> Installer Service，而沙箱里该服务不可用，会导致打包失败（exit 216）。为此
-> `build.gradle.kts` 里的 `wrapWixLight` 任务会把原版 WiX 解压到
-> `build/wix311/real/`，再用 `packaging/LightWrapper.cs` 编译出一个 light.exe
-> 包装器，链接时自动追加 `-sval` 跳过 ICE 校验。在普通（非沙箱）机器上打包时
-> 也可删除这段逻辑。
+### CI
+
+仓库带 `.github/workflows/ci.yml`：push / PR 到 `master` 时，在 `ubuntu-latest` 与
+`windows-latest` 上以 Temurin JDK 21 跑 `./gradlew test`，再跑一遍 `./gradlew packageZip`
+（jpackage app-image，不需要 WiX），产物上传为 artifact。macOS 暂未纳入打包矩阵：
+`.app` 内含符号链接、`packageZip` 的 macOS 路径尚未验证过（见上文 TODO）。
+
+### 沙箱 / 受限环境构建
+
+`build.gradle.kts` 只包含可移植逻辑，不指向任何特定机器。沙箱专用的那些辅助
+（临时目录重定向、包装 WiX `light.exe` 跳过 ICE 校验）全部收在 `gradle/sandbox.gradle.kts`，
+**默认不加载**，需要时显式开启：
+
+```bash
+./gradlew -Psandbox packageMsi        # macOS / Linux
+.\gradlew.bat -Psandbox packageMsi    # Windows
+GRADLE_SANDBOX=1 ./gradlew packageMsi # 与 -Psandbox 等效
+```
+
+`-Psandbox` 会做两件事：把 `run` 的 `java.io.tmpdir` / `skiko.data.path` 指到可写位置，
+以及让 `packageMsi` 依赖 `wrapWixLight`（ICE 校验需要 Windows Installer Service，沙箱里
+该服务不可用会让 `light.exe` 以 exit 216 失败）。普通 Windows 机器上不需要它 —— WiX 3
+会照常自动下载、ICE 校验也能通过；详见该文件顶部注释。
 
 ## 操作说明
 
@@ -117,12 +135,15 @@ WiX 3（约 34 MB，缓存到 Gradle 用户目录下的 `compose-jb/wix311.zip`�
 
 ```
 gallery/
-├── build.gradle.kts               # 构建脚本（平台判定 + JUnit5 测试 + 沙箱临时目录重定向 + 打包）
+├── build.gradle.kts               # 构建脚本（平台判定 + JUnit5 测试 + 打包；沙箱逻辑不在这里）
 ├── settings.gradle.kts
 ├── gradle.properties
 ├── .gitattributes                 # 行尾规则（gradlew/*.sh 固定 LF，*.bat/*.ps1 固定 CRLF）
 ├── gradlew / gradlew.bat          # Gradle Wrapper（Linux/macOS 用 gradlew，Windows 用 gradlew.bat）
-├── gradle/wrapper/                # wrapper jar + gradle-wrapper.properties（决定 Gradle 版本）
+├── gradle/
+│   ├── wrapper/                   # wrapper jar + gradle-wrapper.properties（决定 Gradle 版本）
+│   └── sandbox.gradle.kts         # 沙箱专用构建辅助（-Psandbox 才加载）：临时目录重定向 + WiX light.exe 包装
+├── .github/workflows/ci.yml       # CI：ubuntu/windows × JDK21 跑 test + packageZip
 ├── packaging/
 │   └── LightWrapper.cs            # WiX light.exe 包装器（跳过 ICE 校验，沙箱打包用）
 └── src/
@@ -132,9 +153,10 @@ gallery/
     │       ├── Main.kt            # 入口 + 全屏处理 + 窗口图标
     │       ├── AppState.kt        # 应用状态 + 书架/进度/最近打开/主题/搜索
     │       ├── Model.kt           # ImageSource / ImageItem / 排序（含升降序）
-    │       ├── Bookshelf.kt       # BookEntry + JSON 持久化（Gson）
-    │       ├── Settings.kt        # 主题/排序方向/幻灯片间隔/最近打开/语言持久化（Gson）
-    │       ├── ArchiveReader.kt   # 压缩包读取（zip / 7z，条目名编码回退）
+    │       ├── Bookshelf.kt       # BookEntry + 书架 JSON 持久化（经 JsonStore 原子写）
+    │       ├── Settings.kt        # 主题/排序方向/幻灯片间隔/最近打开/语言持久化（同上）
+    │       ├── JsonStore.kt       # 数据目录 + JSON 读写 + 原子写（临时文件 + ATOMIC_MOVE）
+    │       ├── ArchiveReader.kt   # 压缩包读取（zip / 7z，条目名编码探测）
     │       ├── ImageScanner.kt    # 目录 / 归档扫描
     │       ├── ImageLoader.kt     # Skia 解码 + 缩放 + 缩略图 LRU 缓存
     │       ├── FileOps.kt         # 打开文件夹/压缩包、回收站、文件管理器
@@ -146,9 +168,12 @@ gallery/
     │           ├── App.kt             # 顶层编排 + 快捷键 + 幻灯片 + 对话框
     │           ├── GalleryScreen.kt   # 网格视图 + 工具栏（排序/主题/语言菜单）
     │           ├── BookshelfScreen.kt # 书架视图
-    │           ├── ImageViewer.kt     # 大图查看（缩放/平移/信息面板）
+    │           ├── ImageViewer.kt     # 大图查看（缩放/平移/信息面板/加载失败态）
     │           ├── Thumbnail.kt       # 缩略图组件
     │           └── Theme.kt           # 主题（光/暗/跟随系统）+ 语义色/间距/圆角 token
     └── test/kotlin/gallery/
-        └── GalleryCoreTest.kt     # JUnit5/kotlin.test 测试（解码/缩放/内存/书架/动画 GIF）
+        └── GalleryCoreTest.kt     # JUnit5/kotlin.test 测试（解码/缩放/内存/书架/进度/编码回退）
 ```
+
+> 数据目录默认 `~/.ComposeGallery`，可用 `-Dcompose.gallery.home=<dir>` 整体改到别处
+> （单元测试靠它把读写隔离到临时目录，不会碰真实的用户数据）。

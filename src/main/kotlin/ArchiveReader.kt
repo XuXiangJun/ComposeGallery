@@ -5,7 +5,10 @@ import org.apache.commons.compress.archivers.sevenz.SevenZFile
 import org.apache.commons.compress.archivers.zip.ZipArchiveEntry
 import org.apache.commons.compress.archivers.zip.ZipFile as CompressZipFile
 import java.io.File
+import java.nio.ByteBuffer
+import java.nio.charset.CharacterCodingException
 import java.nio.charset.Charset
+import java.nio.charset.StandardCharsets
 import java.util.LinkedHashMap
 
 /**
@@ -102,9 +105,8 @@ class ArchiveReader private constructor(
                 .setFile(file)
                 .setCharset(Charsets.UTF_8)
                 .get()
-            // 若条目名含替换字符，说明编码不是 UTF-8（常见为 GBK/GB18030 中文名），换编码重开。
-            val needsFallback = utf8.entries.toList().any { '\uFFFD' in it.name }
-            if (!needsFallback) {
+            // 若条目名不是 UTF-8 编码（常见为 GBK/GB18030 中文名），换编码重开。
+            if (!needsFallback(utf8)) {
                 return ArchiveReader(utf8, null)
             }
             utf8.close()
@@ -113,6 +115,34 @@ class ArchiveReader private constructor(
                 .setCharset(Charset.forName("GB18030"))
                 .get()
             return ArchiveReader(gbk, null)
+        }
+
+        /**
+         * 是否有条目名不是 UTF-8 编码的。
+         *
+         * 不能靠查 `'\uFFFD'` 或 `'?'` 判断（曾经的写法就是查 \uFFFD，永远命中不了）：
+         * commons-compress 的 UTF-8 解码器对畸形输入是**替换成 '?'**
+         * （NioZipEncoding：CodingErrorAction.REPLACE + replaceWith("?")），既不给 U+FFFD
+         * 也不抛异常；而 '?' 本身是合法文件名字符，查它又会把正常 zip 误判成 GBK。
+         * 何况畸形字节还可能恰好拼成合法 UTF-8 —— GBK 的 D2 BB 用 UTF-8 解会得到 U+04BB，
+         * 光看解码结果根本判断不出原始编码。
+         *
+         * 可靠做法是拿 [org.apache.commons.compress.archivers.zip.ZipArchiveEntry.getRawName]
+         * 的原始字节做一次**严格** UTF-8 解码：抛 CharacterCodingException 就说明这批名字
+         * 不是 UTF-8 写的。
+         */
+        private fun needsFallback(zip: CompressZipFile): Boolean =
+            zip.entries.toList().any { !isValidUtf8(it.rawName) }
+
+        /** 严格 UTF-8 解码：任何畸形 / 无法映射的字节都算不合法。 */
+        private fun isValidUtf8(bytes: ByteArray?): Boolean {
+            if (bytes == null) return true
+            return try {
+                StandardCharsets.UTF_8.newDecoder().decode(ByteBuffer.wrap(bytes))
+                true
+            } catch (_: CharacterCodingException) {
+                false
+            }
         }
     }
 }

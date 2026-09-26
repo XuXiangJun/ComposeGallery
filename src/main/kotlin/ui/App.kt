@@ -131,13 +131,21 @@ fun App(
             error = strings.t(StringsKey.ArchiveEmpty)
             return false
         }
+
+        // 先把上一个图集的进度存下来 —— 必须在下面改动 archive/folder 之前。
+        // 放到后面的话，saveCurrentProgress() 会拿到「新图集的 id + 上一次的 selectedIndex」，
+        // 把书架上另一个条目的 progress/total 一起冲掉。
+        state.saveCurrentProgress()
+
         state.archiveReader?.close()
         state.archiveReader = reader
         state.archive = file
         state.folder = null
         state.resumeFromBook = resume
         state.searchQuery = ""
-        state.closeViewer()
+        // 直接重置查看态而不调 closeViewer()：它内部还会用（已经是新的）locationPath 再存一次进度。
+        state.selectedIndex = -1
+        state.slideshow = false
         state.images = sortImages(items, state.sortMode, state.sortDirection)
         finishLoad()
         if (recordRecent) state.addRecent(file.absolutePath, file.name, "archive")
@@ -150,11 +158,15 @@ fun App(
             error = strings.t(StringsKey.FolderNotFound, dir.absolutePath)
             return false
         }
+        // 先存上一个图集的进度（此刻 locationPath 还指向它），再切位置 —— 说明同 loadArchive。
+        state.saveCurrentProgress()
+        // 关掉上一个归档的 reader。它内部会再存一次进度，但位置没变、内容没变，是幂等空操作。
         state.closeArchive()
         state.folder = dir
         state.resumeFromBook = resume
         state.searchQuery = ""
-        state.closeViewer()
+        state.selectedIndex = -1
+        state.slideshow = false
         state.loading = true
         try {
             state.images = sortImages(ImageScanner.scan(dir, state.recursive), state.sortMode, state.sortDirection)
@@ -273,7 +285,7 @@ fun App(
     LaunchedEffect(state.selectedIndex) {
         if (state.selectedIndex < 0) return@LaunchedEffect
         delay(800)
-        state.updateProgress()
+        state.saveCurrentProgress()
     }
 
     // 预取相邻图片：翻页时直接命中全尺寸缓存，不用干等解码（失败静默忽略）。

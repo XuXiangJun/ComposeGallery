@@ -69,13 +69,13 @@ class AppState {
     }
 
     fun closeViewer() {
-        updateProgress()
+        saveCurrentProgress()
         selectedIndex = -1
         slideshow = false
     }
 
     fun closeArchive() {
-        updateProgress()
+        saveCurrentProgress()
         archiveReader?.close()
         archiveReader = null
         archive = null
@@ -187,24 +187,30 @@ class AppState {
     }
 
     /** 翻页/关闭时更新当前图集的书架进度。 */
-    fun updateProgress() {
-        val id = locationPath ?: return
-        if (selectedIndex < 0) return
+    fun updateProgress(id: String?, index: Int, total: Int) {
+        if (id == null || index < 0) return
         val idx = books.indexOfFirst { it.id == id }
-        if (idx >= 0) {
-            val b = books[idx]
-            if (b.progress != selectedIndex || b.total != images.size) {
-                books = books.toMutableList().also {
-                    it[idx] = b.copy(
-                        progress = selectedIndex,
-                        total = images.size,
-                        lastRead = System.currentTimeMillis(),
-                    )
-                }
-                BookshelfStore.save(books)
-            }
+        if (idx < 0) return
+        val b = books[idx]
+        if (b.progress == index && b.total == total) return
+        books = books.toMutableList().also {
+            it[idx] = b.copy(
+                progress = index,
+                total = total,
+                lastRead = System.currentTimeMillis(),
+            )
         }
+        BookshelfStore.save(books)
     }
+
+    /**
+     * 把「当前打开的图集」的进度写回书架；关闭 / 切换图集前调用。
+     *
+     * 三个参数在 [updateProgress] 里全部显式传入，而不是读 [locationPath] / [selectedIndex] /
+     * [images]：切换图集的那一刻 [folder] / [archive] 已经被换成新图集了，靠隐式当前状态就会
+     * 把「新图集的 id + 上一次的阅读位置」写进书架上另一个条目，把它的进度和总数一起冲掉。
+     */
+    fun saveCurrentProgress() = updateProgress(locationPath, selectedIndex, images.size)
 
     fun progressFor(id: String?): Int = id?.let { books.firstOrNull { b -> b.id == id }?.progress } ?: 0
 }

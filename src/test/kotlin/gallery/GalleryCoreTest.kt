@@ -7,14 +7,18 @@ import com.google.gson.reflect.TypeToken
 import java.awt.Color
 import java.awt.image.BufferedImage
 import java.io.File
+import java.nio.charset.Charset
+import java.nio.file.Files
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 import gallery.ui.ZoomState
 import javax.imageio.ImageIO
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
+import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 
@@ -23,6 +27,26 @@ import org.junit.jupiter.api.io.TempDir
  * 以及书架数据的 JSON 持久化序列化。
  */
 class GalleryCoreTest {
+
+    companion object {
+        /**
+         * 把两个 Store 的数据目录隔离到临时目录。
+         *
+         * 目录由 `-Dcompose.gallery.home` 决定，而 Kotlin `object` 只在首次访问时初始化 ——
+         * companion 的 init 随类加载完成、早于任何测试方法，所以属性一定先于
+         * BookshelfStore / SettingsStore 被设上。否则构造 [AppState] 的测试会去读写
+         * 真实的 ~/.ComposeGallery，那既是副作用也会让结果依赖机器状态。
+         */
+        private val isolatedHome: File = Files.createTempDirectory("gallery-test-home").toFile().apply {
+            System.setProperty("compose.gallery.home", absolutePath)
+        }
+
+        @AfterAll
+        @JvmStatic
+        fun deleteIsolatedHome() {
+            isolatedHome.deleteRecursively()
+        }
+    }
 
     @TempDir
     lateinit var tmpDir: File
@@ -91,7 +115,223 @@ class GalleryCoreTest {
         assertEquals(book, back[0])
     }
 
+    // ---------- 书架进度：切图集时不能冲掉别的条目 ----------
+
+    /**
+     * 回归测试：打开新图集前必须先存**上一个**图集的进度。
+     *
+     * 曾经的写法是在 `state.folder = dir` 之后才调 `closeViewer()` 存进度，于是
+     * updateProgress 拿到「新图集的 id + 上一次的 selectedIndex」，把书架上另一个条目的
+     * progress/total 一起覆盖掉。这里按 App.loadFolder 的顺序复刻一遍，并重开 AppState
+     * 从磁盘读回，确认落盘内容是对的。
+     */
+    @Test
+    fun openingAnotherLocationDoesNotClobberItsSavedProgress() {
+        val a = File(tmpDir, "A").apply { mkdirs() }
+        val b = File(tmpDir, "B").apply { mkdirs() }
+        repeat(10) { File(a, "a$it.jpg").writeBytes(byteArrayOf(0)) }
+        repeat(5) { File(b, "b$it.jpg").writeBytes(byteArrayOf(0)) }
+        val aItems = a.listFiles()!!.sortedBy { it.name }.map(::itemFromFile)
+        val bItems = b.listFiles()!!.sortedBy { it.name }.map(::itemFromFile)
+
+        // A、B 都在书架上：A 在第 1 张，B 在第 2 张
+        val state = AppState()
+        state.books = listOf(
+            BookEntry(
+                id = a.absolutePath, name = "A", type = "folder", path = a.absolutePath,
+                cover = aItems.first().file!!.absolutePath, progress = 0, total = 10, lastRead = 1L,
+            ),
+            BookEntry(
+                id = b.absolutePath, name = "B", type = "folder", path = b.absolutePath,
+                cover = bItems.first().file!!.absolutePath, progress = 1, total = 5, lastRead = 1L,
+            ),
+        )
+
+        // 正在看 A，停在第 8 张
+        state.folder = a
+        state.images = aItems
+        state.selectedIndex = 7
+
+        // 复刻 App.loadFolder()：先存旧图集进度，再切位置
+        state.saveCurrentProgress()
+        state.folder = b
+        state.images = bItems
+        state.selectedIndex = -1
+
+        // 重开一个 AppState 从磁盘读回
+        val reloaded = AppState()
+        assertEquals(7, reloaded.progressFor(a.absolutePath), "A 的阅读位置应当被保存")
+        assertEquals(1, reloaded.progressFor(b.absolutePath), "B 的进度不应被 A 的阅读位置覆盖")
+        assertEquals(5, reloaded.books.single { it.id == b.absolutePath }.total, "B 的总数不应被 A 的图片数覆盖")
+    }
+
+    /** 同一个图集重复存同一进度不应产生多余写盘（updateProgress 的短路分支）。 */
+    @Test
+    fun savingTheSameProgressTwiceIsANoop() {
+        val f = File(tmpDir, "C").apply { mkdirs() }
+        repeat(3) { File(f, "c$it.jpg").writeBytes(byteArrayOf(0)) }
+        val items = f.listFiles()!!.sortedBy { it.name }.map(::itemFromFile)
+
+        val state = AppState()
+        state.books = listOf(
+            BookEntry(f.absolutePath, "C", "folder", f.absolutePath, items.first().file!!.absolutePath, 2, 3, 1L)
+        )
+        state.folder = f
+        state.images = items
+        state.selectedIndex = 2
+
+        state.saveCurrentProgress()
+        val afterFirst = state.books.single()
+        state.saveCurrentProgress()
+        val afterSecond = state.books.single()
+
+        assertEquals(2, afterFirst.progress)
+        assertEquals(afterFirst.lastRead, afterSecond.lastRead, "内容没变时不应刷新 lastRead（即没有重复写盘）")
+    }
+
+    // ---------- 持久化：损坏文件容错 + 原子写不留残留 ----------
+
+    @Test
+    fun bookshelfStoreRoundTripsAndLeavesNoTempFiles() {
+        val books = listOf(
+            BookEntry("id1", "漫画", "archive", "C:/a.zip", "C:/a.zip!/001.jpg", 12, 57, 123456L),
+            BookEntry("id2", "文件夹", "folder", "D:/pics", "D:/pics/0001.jpg", 0, 3, 654321L),
+        )
+        BookshelfStore.save(books)
+        // 覆盖写（目标文件已存在）也必须成功
+        BookshelfStore.save(books)
+
+        assertEquals(books, BookshelfStore.load(), "原子写 + 覆盖写后应能原样读回")
+        val leftovers = BookshelfStore.dir.listFiles { f -> f.name.endsWith(".tmp") } ?: emptyArray()
+        assertTrue(leftovers.isEmpty(), "move 成功后不应残留临时文件，实际: ${leftovers.map { it.name }}")
+    }
+
+    @Test
+    fun storesFallBackWhenJsonIsCorrupt() {
+        BookshelfStore.dir.mkdirs()
+        BookshelfStore.file.writeText("{ 这不是合法 JSON")
+        SettingsStore.dir.mkdirs()
+        SettingsStore.file.writeText("[[[not json")
+
+        assertTrue(BookshelfStore.load().isEmpty(), "书架文件损坏时应退化成空书架而不是抛异常")
+        assertEquals(Settings(), SettingsStore.load(), "设置文件损坏时应退回默认值")
+    }
+
+    @Test
+    fun storeHomeDirIsOverridableForTests() {
+        assertEquals(File(System.getProperty("compose.gallery.home")), BookshelfStore.dir)
+        assertEquals(BookshelfStore.dir, SettingsStore.dir)
+        assertEquals(File(BookshelfStore.dir, "bookshelf.json"), BookshelfStore.file)
+    }
+
+    // ---------- 压缩包：GBK 条目名回退 ----------
+
+    /**
+     * zip 条目名不是 UTF-8 时（GBK / Shift-JIS 是中文、日文压缩包的常见情况），
+     * Commons Compress 按 UTF-8 解出来是乱码；[ArchiveReader] 靠 U+FFFD 探测并回退 GB18030。
+     * 这是 README 主打的能力，原先没有测试覆盖。
+     */
+    @Test
+    fun gbkEncodedZipEntryNamesAreRecovered() = runBlocking {
+        val png = File(tmpDir, "solid.png")
+        writeSolidPng(png, 400, 300, Color.RED)
+        val zipFile = File(tmpDir, "gbk.zip")
+        // ZipOutputStream 传非 UTF-8 charset 时不置 EFS 标志位，条目名按该 charset 裸写 ——
+        // 正是真实世界里那种「Windows 资源管理器压出来的中文 zip」。
+        ZipOutputStream(zipFile.outputStream(), Charset.forName("GBK")).use { zos ->
+            zos.putNextEntry(ZipEntry("漫画/第一话/001.jpg"))
+            zos.write(png.readBytes())
+            zos.closeEntry()
+            zos.putNextEntry(ZipEntry("漫画/第一话/002.png"))
+            zos.write(png.readBytes())
+            zos.closeEntry()
+        }
+
+        ArchiveReader.open(zipFile).use { reader ->
+            assertEquals(
+                listOf("漫画/第一话/001.jpg", "漫画/第一话/002.png"),
+                reader.entries.map { it.name }.sorted(),
+                "GBK 条目名应被回退解码回来，而不是变成乱码",
+            )
+
+            val items = ImageScanner.scanArchive(zipFile, reader)
+            assertEquals(2, items.size)
+            assertEquals("001.jpg", items.first().name, "显示名应取条目最后一段")
+            val thumb = ImageLoader.loadThumbnail(items.first().source, 100)
+            assertNotNull(thumb)
+            assertEquals(100, thumb.width)
+        }
+    }
+
+    /** UTF-8 zip 不该被回退路径破坏（回退只会多做一次打开，结果必须仍然正确）。 */
+    @Test
+    fun utf8ZipEntryNamesStillWork() = runBlocking {
+        val png = File(tmpDir, "solid.png")
+        writeSolidPng(png, 400, 300, Color.RED)
+        val zipFile = File(tmpDir, "utf8.zip")
+        ZipOutputStream(zipFile.outputStream(), Charsets.UTF_8).use { zos ->
+            zos.putNextEntry(ZipEntry("漫画/001.jpg"))
+            zos.write(png.readBytes())
+            zos.closeEntry()
+        }
+
+        ArchiveReader.open(zipFile).use { reader ->
+            assertEquals(listOf("漫画/001.jpg"), reader.entries.map { it.name })
+            assertEquals(1, ImageScanner.scanArchive(zipFile, reader).size)
+        }
+    }
+
+    /**
+     * 名字里带合法 `?` 的 zip 不能被误判成 GBK。
+     *
+     * 这是编码探测的镜像用例：commons-compress 把畸形 UTF-8 字节解成 `?`，所以任何
+     * 「查 `?` 就当它是 GBK」的启发式都会把这种正常 zip 按 GB18030 重解一遍，变成乱码。
+     * 现在的探测走 rawName + 严格 UTF-8 解码，不依赖解码后的字符。
+     */
+    @Test
+    fun zipNamesContainingQuestionMarkStayUtf8() {
+        val zipFile = File(tmpDir, "question.zip")
+        ZipOutputStream(zipFile.outputStream(), Charsets.UTF_8).use { zos ->
+            zos.putNextEntry(ZipEntry("what?.jpg"))
+            zos.write(byteArrayOf(1))
+            zos.closeEntry()
+            zos.putNextEntry(ZipEntry("схема/001.png"))
+            zos.write(byteArrayOf(1))
+            zos.closeEntry()
+        }
+
+        ArchiveReader.open(zipFile).use { reader ->
+            assertEquals(
+                listOf("what?.jpg", "схема/001.png"),
+                reader.entries.map { it.name }.sorted(),
+                "合法 '?' 与非 ASCII 的 UTF-8 名字都不该触发 GB18030 回退",
+            )
+        }
+    }
+
+    // ---------- 解码失败：契约是返回 null ----------
+    /**
+     * [ImageLoader.loadFull] 失败时必须返回 null，ImageViewer 靠这个走失败分支。
+     * 曾经的 UI 把「还在加载」和「解码失败」表现得一模一样，静态图会永远转圈。
+     */
+    @Test
+    fun undecodableBytesReturnNullInsteadOfThrowing() = runBlocking {
+        val notAnImage = File(tmpDir, "not-image.png").apply { writeBytes(byteArrayOf(1, 2, 3, 4, 5, 6, 7, 8)) }
+        // PNG 魔数 + 垃圾内容：能过格式探测、过不了解码
+        val truncated = File(tmpDir, "truncated.png").apply {
+            writeBytes(byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3))
+        }
+
+        for (f in listOf(notAnImage, truncated)) {
+            assertNull(ImageLoader.loadFull(FileSource(f)), "${f.name} 解码失败应返回 null")
+            assertNull(ImageLoader.loadThumbnail(FileSource(f), 100), "${f.name} 缩略图失败应返回 null")
+        }
+    }
+
     private fun item(name: String) = ImageItem(FileSource(File(tmpDir, name)), name, 1024L, 0L)
+
+    /** 由磁盘文件构造 ImageItem（目录扫描的等价物，供进度类测试使用）。 */
+    private fun itemFromFile(f: File) = ImageItem(FileSource(f), f.name, f.length(), f.lastModified())
 
     /**
      * 滚轮/手势缩放时，光标下的内容应保持不动。

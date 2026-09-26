@@ -204,11 +204,18 @@ fun ImageViewer(
     onSlideshowSecondsChange: (Float) -> Unit,
 ) {
     var loadedImage by remember(item) { mutableStateOf<LoadedImage?>(null) }
+    var loadFailed by remember(item) { mutableStateOf(false) }
     val zoom = remember { ZoomState() }
     val focusRequester = remember { FocusRequester() }
     LaunchedEffect(item) {
         zoom.reset()
+        loadedImage = null
+        loadFailed = false
         loadedImage = ImageLoader.loadFull(item.source)
+        // loadFull 内部 runCatching{}.getOrNull()：解码失败、文件被删、不可读都返回 null。
+        // 不单独记一个失败态的话，这三种情况和「还在加载」在 UI 上完全一样 —— 静态图会永远转圈，
+        // 而 GIF 分支早就有 LoadAnimationFailed 了，这里补上对齐。
+        if (loadedImage == null) loadFailed = true
         focusRequester.requestFocus()
     }
 
@@ -224,6 +231,22 @@ fun ImageViewer(
         val li = loadedImage
         val s = LocalStrings.current
         when {
+            // 失败态必须排在 li == null 之前：两者 loadedImage 都是 null，靠 loadFailed 区分。
+            loadFailed -> {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(s.t(StringsKey.LoadFailed), color = ViewerMuted, fontSize = 13.sp)
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            item.name,
+                            color = ViewerDim,
+                            fontSize = 11.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+            }
             li == null -> {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
