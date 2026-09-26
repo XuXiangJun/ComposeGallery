@@ -157,9 +157,7 @@ object ImageLoader {
     private fun decodeScaledViaCodec(bytes: ByteArray, maxDim: Int): ImageBitmap? {
         val data = Data.makeFromBytes(bytes)
         try {
-            // 无法识别的字节（不是图片 / 被截断）会返回 null，而不是抛异常；
-            // 显式判空，别让 finally 里的 close() 抛 NPE 去冒充解码失败。
-            val codec = Codec.makeFromData(data) ?: return null
+            val codec = Codec.makeFromData(data)
             try {
                 val info = codec.imageInfo
                 val iw = info.width

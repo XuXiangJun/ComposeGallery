@@ -25,7 +25,7 @@
 
 ## 技术栈
 
-- Kotlin 2.4.20 · Compose Multiplatform 1.12.0 · Gradle 9.7.1 · JDK 21（Temurin 21.0.12）
+- Kotlin 2.4.20 · Compose Multiplatform 1.12.1 · Gradle 9.7.1 · JDK 21（Temurin 21.0.12）
 - 图片解码/缩放使用 Skia（skiko），解码时自动应用 EXIF 方向；`compose.desktop.currentOs` 会按当前平台自动解析原生依赖，因此 Windows / Linux / macOS 共用同一份源码
 - 压缩包读取：Apache Commons Compress 1.28.0（zip + 7z，zip 条目名自动检测 UTF-8 / GB18030 编码）
 

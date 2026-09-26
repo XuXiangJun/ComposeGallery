@@ -7,7 +7,7 @@ import java.util.zip.ZipOutputStream
 plugins {
     kotlin("jvm") version "2.4.20"
     id("org.jetbrains.kotlin.plugin.compose") version "2.4.20"
-    id("org.jetbrains.compose") version "1.12.0"
+    id("org.jetbrains.compose") version "1.12.1"
 }
 
 // 受限环境（沙箱）的构建辅助逻辑不参与默认构建路径：临时目录重定向、WiX light.exe 包装等
@@ -40,7 +40,10 @@ repositories {
 
 dependencies {
     implementation(compose.desktop.currentOs)
-    implementation("org.jetbrains.compose.material:material:1.12.0")
+    implementation("org.jetbrains.compose.material:material:1.12.1")
+    // material3 是 JetBrains 自己的版本线：稳定版最高只到 1.9.0，之后的 1.12.0-alpha03 /
+    // 1.13.0-alpha01 全是预发布。本项目实际只用了 Material 2（见 ui/ 的 import），
+    // 所以这里不跟进 alpha —— 要 Material3 应该直接换 API，而不是把依赖升成预发布版。
     implementation("org.jetbrains.compose.material3:material3:1.9.0")
     implementation("org.jetbrains.compose.material:material-icons-core:1.7.3")
     implementation("org.apache.commons:commons-compress:1.28.0")
