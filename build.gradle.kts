@@ -40,11 +40,11 @@ repositories {
 
 dependencies {
     implementation(compose.desktop.currentOs)
+    // UI 组件全部来自 Material 2（androidx.compose.material.*，见 ui/ 下的 import）——
+    // 没有一处用到 material3，所以不声明该依赖。要迁到 Material3 时记得把
+    // org.jetbrains.compose.material3:material3 加回来（注意 JetBrains 侧它的稳定版
+    // 线最高只到 1.9.0，之后是 alpha，别顺手升预发布版）。
     implementation("org.jetbrains.compose.material:material:1.12.1")
-    // material3 是 JetBrains 自己的版本线：稳定版最高只到 1.9.0，之后的 1.12.0-alpha03 /
-    // 1.13.0-alpha01 全是预发布。本项目实际只用了 Material 2（见 ui/ 的 import），
-    // 所以这里不跟进 alpha —— 要 Material3 应该直接换 API，而不是把依赖升成预发布版。
-    implementation("org.jetbrains.compose.material3:material3:1.9.0")
     implementation("org.jetbrains.compose.material:material-icons-core:1.7.3")
     implementation("org.apache.commons:commons-compress:1.28.0")
     implementation("com.google.code.gson:gson:2.14.0")
