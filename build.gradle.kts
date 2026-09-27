@@ -23,7 +23,7 @@ if (sandboxBuild) {
     apply(from = "gradle/sandbox.gradle.kts")
 }
 
-group = "com.example"
+group = "com.github.xuxiangjun"
 version = "1.0.0"
 
 // 平台判定：jpackage 的可执行文件名、图标格式与分发包格式在各 OS 上不同。
