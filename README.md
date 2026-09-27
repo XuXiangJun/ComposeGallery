@@ -97,6 +97,22 @@ $env:GRADLE_USER_HOME = "D:\gradle-home"; $env:TMP = $env:TEMP = "D:\tmp"; .\gra
 `packageMsi` 用 JDK 自带的 jpackage + jlink + WiX 生成 MSI。首次运行会自动联网下载
 WiX 3（约 34 MB，缓存到 Gradle 用户目录下的 `compose-jb/wix311.zip`）。
 
+`packageZip` 是自定义任务（jpackage `--type app-image` 后再 zip），有两个容易踩的实现细节，
+都已在 `build.gradle.kts` 里注释：
+
+- **skiko 原生库必须显式放进 `app/`**。`.cfg` 里 `app.classpath=$APPDIR\*.jar` 说明 `$APPDIR`
+  就是 jar 所在的 `app/` 目录，而 `-Dskiko.library.path=$APPDIR` 会让 skiko 到这里找
+  `skiko-windows-x64.dll`。Compose 1.12.x 已不再把原生库解压到 `build/compose/tmp/skiko`，
+  所以改为直接从 classpath 上的 `skiko-awt-runtime-*` jar 里提取，取不到就让构建失败
+  （否则是「打包成功、一运行就 LibraryLoadException」）。
+- **jar 文件名必须全局唯一**。runtimeClasspath 里存在 groupId 不同、基名却相同的 artifact
+  （`androidx.compose.runtime:runtime-saveable-desktop:1.12.1` 与
+  `org.jetbrains.compose.runtime:runtime-saveable-desktop:1.12.1`，后者是只有 LICENSE 的空壳），
+  按原名拷进同一个目录会互相覆盖，导致 `NoClassDefFoundError`。所以输出名带上 group
+  （如 `androidx.compose.runtime_runtime-saveable-desktop_1.12.1.jar`），并在拷贝前校验无重名。
+
+验证过：`packageZip` 产物解压后可直接启动（进程存活、窗口标题 `Compose Gallery`、无异常输出）。
+
 ### CI
 
 仓库带 `.github/workflows/ci.yml`：push / PR 到 `master` 时，在 `ubuntu-latest` 与

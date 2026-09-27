@@ -67,6 +67,12 @@ jobs:
         shell: bash
         run: ./gradlew packageZip --stacktrace
 
+      # 打包成功 ≠ 程序能跑：jpackage 只检查 --input 里有没有 jar，skiko 原生库缺失、
+      # 同基名 jar 互相覆盖这类问题它一律放过。verifyPackageZip 把这些查一遍。
+      - name: Verify package
+        shell: bash
+        run: ./gradlew verifyPackageZip --stacktrace
+
       - name: Upload distribution
         uses: actions/upload-artifact@v4
         with:

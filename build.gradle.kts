@@ -107,12 +107,41 @@ val packageZip = tasks.register("packageZip") {
     dependsOn("createRuntimeImage", "jar", "unpackDefaultComposeDesktopJvmApplicationResources")
 
     // configuration cache 要求任务执行期不访问 project / configurations / tasks，
-    // 因此这些都在配置期解析成普通值（File / List<File> / String）后捕获进任务。
+    // 因此这些都在配置期解析成普通值（File / Pair<File, String> / String）后捕获进任务。
     val buildDirFile = layout.buildDirectory.get().asFile
-    val runtimeJars = configurations.getByName("runtimeClasspath").files
-        .filter { it.isFile && it.name.endsWith(".jar") }
+    // 注意：在这个 tasks.register 作用域里，`group` / `name` 指的是**任务**的 group 和 name，
+    // 不是项目的（曾经因此把主 jar 命名成 build_packageZip_1.0.0.jar）。项目身份要显式取。
+    val projectGroup = project.group.toString()
+    val projectName = project.name
+
+    // runtime classpath 上的 jar，以及它应当落到 libs 目录里的**唯一**文件名。
+    //
+    // 不能直接用 jar 自己的文件名：jpackage 会把 --input 里的 jar 平铺进一个目录、再据此
+    // 生成 app.classpath。而 Compose 的 runtimeClasspath 里存在 groupId 不同、基名却
+    // 完全相同的 artifact，例如
+    //   androidx.compose.runtime:runtime-saveable-desktop:1.12.1     （35 条目，真有类）
+    //   org.jetbrains.compose.runtime:runtime-saveable-desktop:1.12.1（ 9 条目，只有 LICENSE）
+    // 按原名拷进同一目录必然互相覆盖，后拷的把先拷的空壳盖上去 —— 打包阶段 BUILD SUCCESSFUL，
+    // 一运行就 NoClassDefFoundError: androidx/compose/runtime/saveable/SaverScope。
+    // 所以输出名带上 group，并校验全局无重名，把这类问题变成构建期失败。
+    val runtimeJarEntries: List<Pair<File, String>> =
+        configurations.getByName("runtimeClasspath").incoming.artifactView {
+            isLenient = true
+        }.artifacts.mapNotNull { artifact ->
+            val f = artifact.file
+            if (!f.isFile || !f.name.endsWith(".jar")) return@mapNotNull null
+            val module = artifact.id.componentIdentifier as? org.gradle.api.artifacts.component.ModuleComponentIdentifier
+            val target = if (module != null) {
+                "${module.group}_${module.module}_${module.version}.jar"
+            } else {
+                // 项目内 artifact 没有 module 坐标，退回原名（下面会校验无重名）
+                f.name
+            }
+            f to target
+        }
+
+    val mainJarName = "${projectGroup}_${projectName}_$version.jar"
     val mainJar = tasks.named<Jar>("jar").get().archiveFile.get().asFile
-    val skikoDir = File(buildDirFile, "compose/tmp/skiko")
     val runtimeImageDir = File(buildDirFile, "compose/tmp/main/runtime")
     val destDir = File(buildDirFile, "compose/binaries/main/app")
     val appIcon = file("src/main/resources/icon.ico")
@@ -122,18 +151,58 @@ val packageZip = tasks.register("packageZip") {
     val appVersion = version.toString()
 
     doLast {
+        // 先把重名检查做在拷贝之前：等 jpackage 生成完 .cfg 才发现缺类就太晚了。
+        val allTargets = runtimeJarEntries.map { it.second } + mainJarName
+        val duplicates = allTargets.groupBy { it }.filterValues { it.size > 1 }.keys
+        check(duplicates.isEmpty()) {
+            "runtime classpath 上有多个 jar 会落到同一个文件名：$duplicates。" +
+                "它们会在 libs 目录里互相覆盖，导致打出来的程序缺类。" +
+                "请给 build.gradle.kts 的输出名规则加上更多区分维度。"
+        }
+
         val libsDir = File(buildDirFile, "compose/tmp/packageZip/libs")
         libsDir.deleteRecursively()
         libsDir.mkdirs()
 
-        // 依赖 jar + 主 jar
-        runtimeJars.forEach { it.copyTo(File(libsDir, it.name), overwrite = true) }
-        mainJar.copyTo(File(libsDir, mainJar.name), overwrite = true)
-
-        // skiko 原生库 + icudtl.dat（Compose 已解压到 tmp/skiko）
-        skikoDir.listFiles()?.forEach { f ->
-            if (f.isFile) f.copyTo(File(libsDir, f.name), overwrite = true)
+        // 依赖 jar + 主 jar（用唯一文件名，见上方说明）
+        runtimeJarEntries.forEach { (src, target) ->
+            src.copyTo(File(libsDir, target), overwrite = true)
         }
+        mainJar.copyTo(File(libsDir, mainJarName), overwrite = true)
+
+        // skiko 原生库（skiko-windows-x64.dll / skiko-linux-x64.so / icudtl.dat）。
+        //
+        // 不能依赖 `build/compose/tmp/skiko`：Compose 1.12.x 已不再把原生库解压到那里，
+        // 该目录不存在时上面那段 listFiles()?.forEach 会静默地什么都不做 —— 结果是 jar 明明
+        // 都在、程序一启动就 LibraryLoadException（缺 skiko-windows-x64.dll），且构建本身
+        // 显示 BUILD SUCCESSFUL，很难排查。
+        //
+        // 改为直接从 classpath 上的 skiko-awt-runtime-<平台> jar 里把原生资源取出来。
+        // 这些 jar 已经随 runtimeJars 拷进 libsDir 了，而 .cfg 里 app.classpath=$APPDIR\xxx.jar
+        // 说明 $APPDIR 正是 libsDir 对应的 app/ 目录 —— 而 -Dskiko.library.path=$APPDIR
+        // 会让 skiko 到这个目录找 .dll。两边对上，缺了它就一定起不来。
+        val skikoNativeNames = mutableListOf<String>()
+        runtimeJarEntries.filter { it.first.name.startsWith("skiko-awt-runtime-") }.forEach { (jar, _) ->
+            ZipFile(jar).use { zf ->
+                val entries = zf.entries()
+                while (entries.hasMoreElements()) {
+                    val entry = entries.nextElement()
+                    // 只取顶层的原生资源（skiko-windows-x64.dll / icudtl.dat / .sha256），跳过 META-INF。
+                    if (entry.isDirectory || entry.name.contains('/')) continue
+                    val out = File(libsDir, entry.name)
+                    zf.getInputStream(entry).use { input ->
+                        out.outputStream().use { output -> input.copyTo(output) }
+                    }
+                    skikoNativeNames += entry.name
+                }
+            }
+        }
+        // 构建期就失败，而不是让用户拿到一个起不来的包。
+        check(skikoNativeNames.isNotEmpty()) {
+            "classpath 上找不到 skiko 原生库 jar（skiko-awt-runtime-*），" +
+                "打包出的程序会因缺少 skiko 原生库而无法启动。请检查 compose.desktop.currentOs 是否生效。"
+        }
+        logger.lifecycle("skiko 原生库已放进 app 目录（即 java-options 里 skiko.library.path 指向处）：${skikoNativeNames.joinToString(", ")}")
 
         // 用 toolchain 的 JDK 21 里的 jpackage（见上方 jdk21Launcher 的说明）。
         // Windows 上是 jpackage.exe，Linux / macOS 上是无扩展名的 jpackage。
@@ -161,7 +230,7 @@ val packageZip = tasks.register("packageZip") {
             "--type", "app-image",
             "--input", libsDir.absolutePath,
             "--runtime-image", runtimeImageDir.absolutePath,
-            "--main-jar", mainJar.name,
+            "--main-jar", mainJarName,
             "--main-class", "gallery.MainKt",
             "--name", appName,
             "--app-version", appVersion,
@@ -170,6 +239,9 @@ val packageZip = tasks.register("packageZip") {
             "--dest", destDir.absolutePath,
             "--java-options", "-Dskiko.library.path=\$APPDIR",
             "--java-options", "-Dcompose.application.configure.swing.globals=true",
+            // JDK 24+ 会警告/阻止未经 native-access 声明的 System.load（skiko 加载原生库就走这条）。
+            // 在 JDK 21 上只是告警，先声明掉，免得每次启动都刷几行 WARNING。
+            "--java-options", "--enable-native-access=ALL-UNNAMED",
         )
         // --icon 只在 Windows 上传：macOS 的 app-image 只接受 .icns（仓库暂无），
         // Linux 的 app-image 不使用图标参数。
@@ -219,5 +291,62 @@ val packageZip = tasks.register("packageZip") {
             }
         }
         logger.lifecycle("portable zip written to ${zipFile.absolutePath} (${zipFile.length() / 1024 / 1024} MB)")
+    }
+}
+
+// 打包产物自检：把「打包 BUILD SUCCESSFUL、程序一运行就崩」这类问题变成构建失败。
+// 真实发生过两次，packageZip 都是绿的：
+//   1) skiko 原生库没进 app/            -> LibraryLoadException
+//   2) 同基名 jar 互相覆盖（空壳赢）     -> NoClassDefFoundError
+// jpackage 只关心 --input 里有没有 jar，这两类缺失它一律不管，所以必须自己查。
+val verifyPackageZip = tasks.register("verifyPackageZip") {
+    group = "verification"
+    description = "Verify the packageZip app image contains what its launcher needs"
+    dependsOn(packageZip)
+
+    // 配置期抓成普通值，执行期不碰 project。
+    val destDirFile = File(layout.buildDirectory.get().asFile, "compose/binaries/main/app")
+    val appName0 = "ComposeGallery"
+    val mac0 = isMac
+
+    doLast {
+        val appImageDir = File(destDirFile, if (mac0) "$appName0.app" else appName0)
+        val appDir = File(appImageDir, "app")
+        check(appDir.isDirectory) { "找不到 app 目录：${appDir.absolutePath}" }
+
+        // 1) skiko 原生库必须真的躺在 app/ —— java-options 里 -Dskiko.library.path=$APPDIR
+        //    指的就是这里，skiko 加载不到就直接 LibraryLoadException。
+        val natives = appDir.listFiles { f ->
+            f.isFile && f.name.startsWith("skiko-") && !f.name.endsWith(".jar")
+        }?.toList().orEmpty()
+        check(natives.isNotEmpty()) {
+            "app/ 里没有任何 skiko 原生库（skiko-windows-x64.dll / skiko-linux-x64.so 等），" +
+                "程序启动时会 LibraryLoadException。请检查 build.gradle.kts 中从 " +
+                "skiko-awt-runtime-* 提取原生库的逻辑。"
+        }
+        val emptyNatives = natives.filter { it.length() == 0L }
+        check(emptyNatives.isEmpty()) {
+            "以下原生库大小为 0 字节：${emptyNatives.map { it.name }}"
+        }
+
+        // 2) .cfg 里引用的 classpath 必须都真实存在。缺失说明往 app/ 拷 jar 时丢了东西
+        //    （最可能是同基名互相覆盖）。
+        val cfg = File(appDir, "$appName0.cfg")
+        check(cfg.isFile) { "找不到启动配置文件：${cfg.absolutePath}" }
+        val appDirMarker = "\$APPDIR"
+        val missing = cfg.readLines().mapNotNull { line ->
+            if (!line.startsWith("app.classpath=")) return@mapNotNull null
+            val rel = line.removePrefix("app.classpath=")
+                .replace(appDirMarker, "")
+                .trim('\\', '/', ' ')
+            if (rel.isEmpty()) null else File(appDir, rel).takeIf { !it.isFile }
+        }
+        check(missing.isEmpty()) {
+            "ComposeGallery.cfg 引用了 ${missing.size} 个不存在的 jar，" +
+                "说明拷贝阶段丢了文件（很可能是同基名 jar 互相覆盖）：" +
+                missing.take(5).joinToString { it.name }
+        }
+
+        logger.lifecycle("verifyPackageZip: OK（skiko 原生库 ${natives.joinToString { it.name }}；classpath 条目全部存在）")
     }
 }
