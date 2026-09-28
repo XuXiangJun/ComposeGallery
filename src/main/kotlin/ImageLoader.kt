@@ -1,8 +1,12 @@
 package gallery
 
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asSkiaBitmap
 import androidx.compose.ui.graphics.toComposeImageBitmap
+import java.io.File
+import java.security.MessageDigest
 import java.util.LinkedHashMap
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
@@ -11,6 +15,7 @@ import org.jetbrains.skia.Bitmap
 import org.jetbrains.skia.Canvas
 import org.jetbrains.skia.Codec
 import org.jetbrains.skia.Data
+import org.jetbrains.skia.EncodedImageFormat
 import org.jetbrains.skia.EncodedOrigin
 import org.jetbrains.skia.Image
 import org.jetbrains.skia.ImageInfo
@@ -64,28 +69,112 @@ private class ByteLruCache<V>(private val maxBytes: Long, private val sizeOf: (V
     }
 }
 
+/**
+ * 缩略图磁盘缓存：`<数据目录>/thumbs/<sha1(key)>.webp`。
+ *
+ * 内存缓存只活在本次运行里，重开一个上万张图的文件夹就得全部重新解码原图（大 JPEG / 压缩包
+ * 条目尤其慢）。缩略图编码成 WebP（保留透明度，比 PNG 小得多）落盘，下次直接解这个小文件。
+ * key 里含路径 + 修改时间 + 大小 + 目标尺寸，原图改动后自然失效。总量超过上限时按最后访问
+ * 时间淘汰最旧的。所有 IO 失败都静默降级为「没有磁盘缓存」。
+ */
+internal object DiskThumbnailCache {
+    private const val MAX_BYTES = 256L * 1024 * 1024
+
+    /** 每写入这么多次检查一次总量（遍历目录不便宜，不必每次都做）。 */
+    private const val PRUNE_EVERY = 200
+
+    private val writes = AtomicInteger()
+
+    val dir: File get() = File(JsonStore.dir, "thumbs")
+
+    private fun fileFor(key: String): File {
+        val digest = MessageDigest.getInstance("SHA-1").digest(key.toByteArray())
+        return File(dir, digest.joinToString("") { "%02x".format(it) } + ".webp")
+    }
+
+    fun read(key: String): ByteArray? = try {
+        val f = fileFor(key)
+        if (f.isFile) {
+            f.setLastModified(System.currentTimeMillis()) // 充当「最近访问时间」，淘汰时用
+            f.readBytes()
+        } else {
+            null
+        }
+    } catch (_: Throwable) {
+        null
+    }
+
+    fun write(key: String, bitmap: ImageBitmap) {
+        try {
+            val image = Image.makeFromBitmap(bitmap.asSkiaBitmap())
+            val data = image.use { it.encodeToData(EncodedImageFormat.WEBP, 85) } ?: return
+            val bytes = data.use { it.bytes }
+            dir.mkdirs()
+            val target = fileFor(key)
+            // 先写临时文件再 move：并发写同一个 key、或写到一半退出，都不会留下半截文件。
+            val tmp = File.createTempFile(target.name, ".tmp", dir)
+            tmp.writeBytes(bytes)
+            if (!tmp.renameTo(target)) tmp.delete()
+            if (writes.incrementAndGet() % PRUNE_EVERY == 1) prune()
+        } catch (t: Throwable) {
+            AppLog.warn("写缩略图缓存失败（${t.message}）")
+        }
+    }
+
+    fun prune() {
+        try {
+            val files = dir.listFiles { f -> f.isFile && f.name.endsWith(".webp") }?.toList() ?: return
+            var total = files.sumOf { it.length() }
+            if (total <= MAX_BYTES) return
+            for (f in files.sortedBy { it.lastModified() }) {
+                if (total <= MAX_BYTES * 3 / 4) break // 一次多删一些，免得每次都刚好卡在上限
+                total -= f.length()
+                f.delete()
+            }
+        } catch (_: Throwable) {
+        }
+    }
+}
+
 object ImageLoader {
-    private val decodeDispatcher = Dispatchers.IO.limitedParallelism(4)
+    private val decodeDispatcher = Dispatchers.IO.limitedParallelism(6)
+
+    /** 缩略图解码并发数。 */
     private val semaphore = Semaphore(4)
+
+    /**
+     * 全尺寸解码（含翻页预取）单独限流：和缩略图共用一个信号量时，前后两页的预取会占掉
+     * 一半名额，翻页那一刻网格缩略图明显变慢。
+     */
+    private val fullSemaphore = Semaphore(2)
 
     /** 缩略图像素缓存上限（约 96MB）。 */
     private const val THUMBNAIL_CACHE_BYTES = 96L * 1024 * 1024
 
-    /** 全尺寸图缓存张数：够前后翻页与预取命中，又不至于常驻太多大图。 */
-    private const val FULL_CACHE_ENTRIES = 4
+    /**
+     * 全尺寸图缓存上限（约 384MB）。按字节而不是按张数：一张 8192² 的静态图就有 256MB、
+     * 一个 GIF 最多 384MB（见 GifDecoder.MAX_TOTAL_PIXELS），按「4 张」限制最坏能到 1GB 以上。
+     * 常见的漫画页（2000×3000 左右 ≈ 24MB）足够放下当前页和前后预取。
+     */
+    private const val FULL_CACHE_BYTES = 384L * 1024 * 1024
 
     private val thumbnailCache = ByteLruCache<ImageBitmap>(THUMBNAIL_CACHE_BYTES) { bitmapBytes(it) }
 
-    private val fullCache = object : LinkedHashMap<String, LoadedImage>(8, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, LoadedImage>?): Boolean =
-            size > FULL_CACHE_ENTRIES
-    }
+    private val fullCache = ByteLruCache<LoadedImage>(FULL_CACHE_BYTES) { loadedBytes(it) }
 
     private fun bitmapBytes(bitmap: ImageBitmap): Long = bitmap.width.toLong() * bitmap.height * 4
 
+    private fun loadedBytes(image: LoadedImage): Long = when (image) {
+        is LoadedImage.Static -> bitmapBytes(image.bitmap)
+        is LoadedImage.Animated -> image.animation.frames.sumOf { bitmapBytes(it) }
+    }
+
+    /** 已在全尺寸缓存里就直接返回（不挂起）；查看器用它避免切图时闪一帧「加载中」。 */
+    fun peekFull(source: ImageSource, maxDim: Int = 8192): LoadedImage? = fullCache.get("${source.cacheKey}?$maxDim")
+
     fun invalidateCache() {
         thumbnailCache.clear()
-        synchronized(fullCache) { fullCache.clear() }
+        fullCache.clear()
     }
 
     suspend fun loadThumbnail(source: ImageSource, targetDim: Int): ImageBitmap? {
@@ -95,38 +184,35 @@ object ImageLoader {
         return semaphore.withPermit {
             thumbnailCache.get(key)?.let { return@withPermit it }
             withContext(decodeDispatcher) {
-                runCatching { decodeThumbnail(source.openBytes(), targetDim) }
-                    .getOrNull()
-                    ?.also { thumbnailCache.put(key, it) }
+                val cached = DiskThumbnailCache.read(key)
+                    ?.let { bytes -> runCatching { decodeScaled(bytes, targetDim) }.getOrNull() }
+                val bitmap = cached
+                    ?: runCatching { decodeThumbnail(source.openBytes(), targetDim) }
+                        .onFailure { AppLog.warn("缩略图解码失败：${source.cacheKey}（${it.message}）") }
+                        .getOrNull()
+                        ?.also { DiskThumbnailCache.write(key, it) }
+                bitmap?.also { thumbnailCache.put(key, it) }
             }
         }
     }
 
     suspend fun loadFull(source: ImageSource, maxDim: Int = 8192): LoadedImage? {
         val key = "${source.cacheKey}?$maxDim"
-        synchronized(fullCache) { fullCache[key] }?.let { return it }
-        return semaphore.withPermit {
-            synchronized(fullCache) { fullCache[key] }?.let { return@withPermit it }
+        fullCache.get(key)?.let { return it }
+        return fullSemaphore.withPermit {
+            fullCache.get(key)?.let { return@withPermit it }
             withContext(decodeDispatcher) {
                 runCatching { decodeFull(source.openBytes(), maxDim) }
+                    .onFailure { AppLog.warn("图片解码失败：${source.cacheKey}", it) }
                     .getOrNull()
-                    ?.also { synchronized(fullCache) { fullCache[key] = it } }
+                    ?.also { fullCache.put(key, it) }
             }
         }
     }
 
     /** 预取相邻图片：结果直接进全尺寸缓存，翻页时命中；失败静默忽略。 */
     suspend fun prefetch(source: ImageSource, maxDim: Int = 8192) {
-        val key = "${source.cacheKey}?$maxDim"
-        if (synchronized(fullCache) { fullCache[key] } != null) return
-        semaphore.withPermit {
-            if (synchronized(fullCache) { fullCache[key] } != null) return@withPermit
-            withContext(decodeDispatcher) {
-                runCatching { decodeFull(source.openBytes(), maxDim) }
-                    .getOrNull()
-                    ?.also { synchronized(fullCache) { fullCache[key] = it } }
-            }
-        }
+        loadFull(source, maxDim)
     }
 
     private fun decodeFull(bytes: ByteArray, maxDim: Int): LoadedImage {

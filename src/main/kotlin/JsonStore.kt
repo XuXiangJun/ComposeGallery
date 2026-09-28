@@ -36,8 +36,27 @@ internal object JsonStore {
     fun read(fileName: String): String? = try {
         val f = file(fileName)
         if (f.exists()) f.readText() else null
-    } catch (_: Throwable) {
+    } catch (t: Throwable) {
+        AppLog.warn("读取 $fileName 失败", t)
         null
+    }
+
+    /**
+     * 把解析不了的 [fileName] 改名成 `<fileName>.corrupt-<时间戳>` 留作备份。
+     *
+     * 两个 Store 遇到坏文件会退回默认值，而下一次 save() 就会把原文件覆盖掉 —— 书架从此
+     * 找不回来。先改名，用户（或我们）至少还能手工修复。
+     */
+    fun backupCorrupt(fileName: String) {
+        try {
+            val f = file(fileName)
+            if (!f.exists()) return
+            val backup = File(dir, "$fileName.corrupt-${System.currentTimeMillis()}")
+            f.renameTo(backup)
+            AppLog.warn("$fileName 无法解析，已备份为 ${backup.name}")
+        } catch (t: Throwable) {
+            AppLog.warn("备份损坏的 $fileName 失败", t)
+        }
     }
 
     /** 原子写入 [fileName]。失败时不抛到调用方（原有的静默语义），但会清理残留的临时文件。 */
@@ -61,11 +80,22 @@ internal object JsonStore {
             // 少数文件系统（部分网络盘 / FUSE）不支持原子 move，退化成普通覆盖写。
             try {
                 Files.move(tmp.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING)
-            } catch (_: Throwable) {
+            } catch (t: Throwable) {
+                AppLog.warn("写入 $fileName 失败", t)
                 tmp.delete()
             }
-        } catch (_: Throwable) {
+        } catch (t: Throwable) {
+            AppLog.warn("写入 $fileName 失败", t)
             tmp.delete()
         }
     }
 }
+
+/**
+ * Gson 用 Unsafe 构造没有无参构造器的 Kotlin 类，JSON 里缺的字段会被填成 null，
+ * 哪怕 Kotlin 声明的是非空类型；非法的枚举值也会变成 null。这类 null 会一路漏到 UI 里
+ * 才抛 NPE。这两个小工具在运行期真正做 null 检查（参数是 `Any?`，编译器不会把判断优化掉）。
+ */
+internal fun <T : Any> T?.orDefault(default: T): T = this ?: default
+
+internal fun allPresent(vararg values: Any?): Boolean = values.all { it != null }

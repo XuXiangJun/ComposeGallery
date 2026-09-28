@@ -69,6 +69,23 @@ class GalleryCoreTest {
         assertEquals(300, full.height)
     }
 
+    /** 缩略图落盘后，清空内存缓存再取应命中磁盘缓存（即使原图已经读不到）。 */
+    @Test
+    fun thumbnailsArePersistedToDisk() = runBlocking {
+        val png = File(tmpDir, "disk.png")
+        writeSolidPng(png, 300, 300, Color.BLUE)
+        val source = FileSource(png)
+        assertNotNull(ImageLoader.loadThumbnail(source, 64))
+        assertTrue(DiskThumbnailCache.dir.listFiles().orEmpty().any { it.name.endsWith(".webp") })
+
+        ImageLoader.invalidateCache()
+        // 同一个 cacheKey（路径 + 修改时间 + 大小在构造时已固定），但文件内容读不到了
+        png.delete()
+        val again = ImageLoader.loadThumbnail(source, 64)
+        assertNotNull(again, "应从磁盘缓存解出缩略图")
+        assertPixel(again, 0xFF0000FF.toInt(), "disk-cached thumbnail")
+    }
+
     @Test
     fun zipArchiveSourceDecodes() = runBlocking {
         val png = File(tmpDir, "solid.png")
