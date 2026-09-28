@@ -1,10 +1,15 @@
 package gallery
 
 import org.apache.commons.compress.archivers.sevenz.SevenZArchiveEntry
+import org.apache.commons.compress.PasswordRequiredException
 import org.apache.commons.compress.archivers.sevenz.SevenZFile
+import org.apache.commons.compress.archivers.sevenz.SevenZMethod
 import org.apache.commons.compress.archivers.zip.ZipArchiveEntry
 import org.apache.commons.compress.archivers.zip.ZipFile as CompressZipFile
+import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.IOException
+import java.io.InputStream
 import java.nio.ByteBuffer
 import java.nio.charset.CharacterCodingException
 import java.nio.charset.Charset
@@ -58,16 +63,34 @@ class ArchiveReader private constructor(
         val bytes = when {
             zip != null -> {
                 val e = zipEntryByName[name] ?: throw NoSuchElementException("zip entry: $name")
-                zip.getInputStream(e).use { it.readBytes() }
+                zip.getInputStream(e).use { readBounded(it, name) }
             }
             sevenZ != null -> {
                 val e = sevenZEntryByName[name] ?: throw NoSuchElementException("7z entry: $name")
-                sevenZ.getInputStream(e).use { it.readBytes() }
+                sevenZ.getInputStream(e).use { readBounded(it, name) }
             }
             else -> throw IllegalStateException("no archive loaded")
         }
         cachePut(name, bytes)
         return bytes
+    }
+
+    /**
+     * 读条目内容，但最多 [MAX_ENTRY_BYTES]。条目头里声明的大小不可信（压缩炸弹可以谎报成
+     * 几 KB、解出来几个 GB），所以按实际读到的字节数截断，超限直接失败，而不是把进程撑爆。
+     */
+    private fun readBounded(input: InputStream, name: String): ByteArray {
+        val out = ByteArrayOutputStream()
+        val buf = ByteArray(64 * 1024)
+        var total = 0L
+        while (true) {
+            val n = input.read(buf)
+            if (n < 0) break
+            total += n
+            if (total > MAX_ENTRY_BYTES) throw IOException("条目过大（超过 ${MAX_ENTRY_BYTES / 1024 / 1024} MB）：$name")
+            out.write(buf, 0, n)
+        }
+        return out.toByteArray()
     }
 
     private fun cachePut(name: String, bytes: ByteArray) {
@@ -87,17 +110,49 @@ class ArchiveReader private constructor(
     }
 
     companion object {
-        val SUPPORTED_EXTENSIONS = setOf("zip", "7z")
+        // cbz / cb7 是漫画阅读器通行的扩展名，内容就是普通的 zip / 7z。
+        val SUPPORTED_EXTENSIONS = setOf("zip", "cbz", "7z", "cb7")
 
         private const val ENTRY_CACHE_COUNT = 8
         private const val ENTRY_CACHE_BYTES = 32L * 1024 * 1024
 
+        /** 单个条目解压后的上限；再大的单张图片也用不到这么多（见 [readBounded]）。 */
+        private const val MAX_ENTRY_BYTES = 512L * 1024 * 1024
+
         fun isSupported(file: File): Boolean = file.extension.lowercase() in SUPPORTED_EXTENSIONS
 
-        fun open(file: File): ArchiveReader = when (file.extension.lowercase()) {
-            "zip" -> openZip(file)
-            "7z" -> ArchiveReader(null, SevenZFile.builder().setFile(file).get())
+        /**
+         * 打开压缩包。[password] 只对 7z 有效。
+         *
+         * @throws PasswordRequiredException 7z 加了密而没给密码（调用方应向用户要密码后重试）。
+         * @throws EncryptedZipException zip 条目加了密：commons-compress 不支持解密 zip。
+         */
+        fun open(file: File, password: CharArray? = null): ArchiveReader = when (file.extension.lowercase()) {
+            "zip", "cbz" -> openZip(file).also { reader ->
+                if (reader.zipEntries.any { it.generalPurposeBit.usesEncryption() }) {
+                    reader.close()
+                    throw EncryptedZipException(file.name)
+                }
+            }
+            "7z", "cb7" -> openSevenZ(file, password)
             else -> throw IllegalArgumentException("不支持的压缩格式: ${file.extension}")
+        }
+
+        private fun openSevenZ(file: File, password: CharArray?): ArchiveReader {
+            val builder = SevenZFile.builder().setFile(file)
+            if (password != null) builder.setPassword(password)
+            // 连文件名一起加密的 7z 在这里就会抛 PasswordRequiredException。
+            val reader = ArchiveReader(null, builder.get())
+            // 只加密内容、不加密文件名的 7z 能打开、能列目录，要到读条目时才失败 ——
+            // 那样每张缩略图都各自失败一次。提前按压缩方法识别出来，统一走要密码的流程。
+            if (password == null && reader.sevenZEntries.any { e ->
+                    e.contentMethods?.any { it.method == SevenZMethod.AES256SHA256 } == true
+                }
+            ) {
+                reader.close()
+                throw PasswordRequiredException(file.name)
+            }
+            return reader
         }
 
         private fun openZip(file: File): ArchiveReader {
@@ -109,12 +164,37 @@ class ArchiveReader private constructor(
             if (!needsFallback(utf8)) {
                 return ArchiveReader(utf8, null)
             }
+            val charset = if (looksLikeShiftJis(utf8)) Charset.forName("Shift_JIS") else Charset.forName("GB18030")
             utf8.close()
-            val gbk = CompressZipFile.builder()
+            val fallback = CompressZipFile.builder()
                 .setFile(file)
-                .setCharset(Charset.forName("GB18030"))
+                .setCharset(charset)
                 .get()
-            return ArchiveReader(gbk, null)
+            return ArchiveReader(fallback, null)
+        }
+
+        /**
+         * 非 UTF-8 的条目名是不是 Shift-JIS（日文压缩包）。
+         *
+         * 不能只看「能不能严格按 Shift_JIS 解码」：GBK 的大量字节序列在 Shift_JIS 里也合法
+         * （0xA1–0xDF 是 Shift_JIS 的半角片假名）。但真正的日文文件名几乎总带全角平假名 /
+         * 片假名（U+3040–U+30FF），而 GBK 字节按 Shift_JIS 解出来落在半角片假名区
+         * （U+FF61–U+FF9F），不会出现全角假名。所以要求：全部严格可解 + 至少出现一个全角假名。
+         */
+        private fun looksLikeShiftJis(zip: CompressZipFile): Boolean {
+            val sjis = Charset.forName("Shift_JIS")
+            var sawKana = false
+            for (e in zip.entries.toList()) {
+                val raw = e.rawName ?: continue
+                if (isValidUtf8(raw)) continue
+                val decoded = try {
+                    sjis.newDecoder().decode(ByteBuffer.wrap(raw)).toString()
+                } catch (_: CharacterCodingException) {
+                    return false
+                }
+                if (decoded.any { it in '\u3040'..'\u30FF' }) sawKana = true
+            }
+            return sawKana
         }
 
         /**
@@ -146,3 +226,6 @@ class ArchiveReader private constructor(
         }
     }
 }
+
+/** zip 里有加密条目。commons-compress 不能解密 zip（ZipCrypto / AES 都不行），只能提示用户。 */
+class EncryptedZipException(name: String) : IOException("加密的 zip 暂不支持：$name")

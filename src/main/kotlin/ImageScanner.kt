@@ -6,16 +6,21 @@ import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 object ImageScanner {
-    val EXTENSIONS = setOf("jpg", "jpeg", "png", "gif", "bmp", "webp", "ico", "jfif", "avif")
+    // 只列 skiko 真能解码的格式：它没有编进 AVIF / HEIF 解码器，列进来只会得到一张张「坏图」。
+    val EXTENSIONS = setOf("jpg", "jpeg", "png", "gif", "bmp", "webp", "ico", "jfif")
 
     /** 并行遍历子目录的 worker 数：瓶颈在磁盘，开太多反而更慢。 */
     private const val SCAN_WORKERS = 8
 
-    suspend fun scan(folder: File, recursive: Boolean, maxFiles: Int = 20_000): List<ImageItem> =
+    /** 单次扫描最多收集的图片数；达到上限时调用方应提示用户列表被截断了。 */
+    const val MAX_FILES = 20_000
+
+    suspend fun scan(folder: File, recursive: Boolean, maxFiles: Int = MAX_FILES): List<ImageItem> =
         withContext(Dispatchers.IO) {
             val found = Collections.synchronizedList(ArrayList<ImageItem>())
             if (!recursive) {
@@ -32,6 +37,8 @@ object ImageScanner {
                 repeat(SCAN_WORKERS) {
                     launch {
                         for (dir in queue) {
+                            // 用户已切到别的图集时尽快停下，不再白白遍历整棵目录树。
+                            ensureActive()
                             if (found.size < maxFiles) {
                                 val children = dir.listFiles()
                                 if (children != null) {
@@ -43,9 +50,9 @@ object ImageScanner {
                                                 pending.incrementAndGet()
                                                 queue.trySend(f)
                                             }
-                                            f.isFile && f.extension.lowercase() in EXTENSIONS ->
+                                            f.isFile && f.extension.lowercase() in EXTENSIONS && !isMacMetadata(f.name) ->
                                                 if (found.size < maxFiles) {
-                                                    found += ImageItem(FileSource(f), f.name, f.length(), f.lastModified())
+                                                    found += fileItem(f)
                                                 }
                                         }
                                     }
@@ -59,12 +66,28 @@ object ImageScanner {
             found.take(maxFiles)
         }
 
+    /**
+     * macOS 打包 / 拷贝时附带的元数据文件：`__MACOSX/` 目录下的一切，以及 AppleDouble 的 `._xxx.jpg`。
+     * 它们扩展名是 .jpg 却不是图片，混进列表就是一张张「坏图」。[path] 可以是 `/` 分隔的条目名。
+     */
+    fun isMacMetadata(path: String): Boolean {
+        val normalized = path.replace('\\', '/')
+        return normalized.startsWith("__MACOSX/") || normalized.contains("/__MACOSX/") ||
+            normalized.substringAfterLast('/').startsWith("._")
+    }
+
+    private fun fileItem(f: File): ImageItem {
+        val size = f.length()
+        val modified = f.lastModified()
+        return ImageItem(FileSource(f, size, modified), f.name, size, modified)
+    }
+
     private fun collectImages(dir: File, result: MutableList<ImageItem>, maxFiles: Int) {
         val children = dir.listFiles() ?: return
         for (f in children) {
             if (result.size >= maxFiles) return
-            if (f.isFile && f.extension.lowercase() in EXTENSIONS) {
-                result += ImageItem(FileSource(f), f.name, f.length(), f.lastModified())
+            if (f.isFile && f.extension.lowercase() in EXTENSIONS && !isMacMetadata(f.name)) {
+                result += fileItem(f)
             }
         }
     }
@@ -73,7 +96,7 @@ object ImageScanner {
         withContext(Dispatchers.IO) {
             reader.entries
                 .filter {
-                    !it.isDirectory &&
+                    !it.isDirectory && !isMacMetadata(it.name) &&
                         it.name.substringAfterLast('/').substringAfterLast('.', "").lowercase() in EXTENSIONS
                 }
                 .map { e ->
@@ -85,6 +108,6 @@ object ImageScanner {
                         e.modified,
                     )
                 }
-                .sortedBy { it.name.lowercase() }
+                .sortedWith(compareBy(NaturalOrder) { it.name })
         }
 }

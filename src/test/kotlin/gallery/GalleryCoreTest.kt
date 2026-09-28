@@ -263,6 +263,72 @@ class GalleryCoreTest {
         }
     }
 
+    /** Shift-JIS 条目名（日文压缩包）应按 Shift_JIS 解码，而不是被当成 GB18030 变成乱码。 */
+    @Test
+    fun shiftJisZipEntryNamesAreRecovered() {
+        val zipFile = File(tmpDir, "sjis.zip")
+        ZipOutputStream(zipFile.outputStream(), Charset.forName("Shift_JIS")).use { zos ->
+            zos.putNextEntry(ZipEntry("まんが/だい1わ/001.jpg"))
+            zos.write(byteArrayOf(0))
+            zos.closeEntry()
+        }
+        ArchiveReader.open(zipFile).use { reader ->
+            assertEquals(listOf("まんが/だい1わ/001.jpg"), reader.entries.map { it.name })
+        }
+    }
+
+    @Test
+    fun cbzIsOpenedAsZip() {
+        val cbz = File(tmpDir, "book.cbz")
+        ZipOutputStream(cbz.outputStream(), Charsets.UTF_8).use { zos ->
+            zos.putNextEntry(ZipEntry("001.jpg"))
+            zos.write(byteArrayOf(0))
+            zos.closeEntry()
+        }
+        assertTrue(ArchiveReader.isSupported(cbz))
+        ArchiveReader.open(cbz).use { assertEquals(listOf("001.jpg"), it.entries.map { e -> e.name }) }
+    }
+
+    /** 带加密标志的 zip 条目应在打开时就明确报「不支持」，而不是每张图各自解码失败。 */
+    @Test
+    fun encryptedZipIsRejectedUpFront() {
+        val zipFile = File(tmpDir, "enc.zip")
+        ZipOutputStream(zipFile.outputStream(), Charsets.UTF_8).use { zos ->
+            zos.putNextEntry(ZipEntry("001.jpg"))
+            zos.write(byteArrayOf(0))
+            zos.closeEntry()
+        }
+        // 写入端（JDK / commons-compress）都不肯写加密条目，这里直接把 general purpose
+        // flag 的 bit 0（encrypted）打到本地头（偏移 6）和中央目录头（偏移 8）上。
+        val bytes = zipFile.readBytes()
+        for (i in 0 until bytes.size - 4) {
+            if (bytes[i] == 'P'.code.toByte() && bytes[i + 1] == 'K'.code.toByte()) {
+                when {
+                    bytes[i + 2] == 3.toByte() && bytes[i + 3] == 4.toByte() -> bytes[i + 6] = (bytes[i + 6].toInt() or 1).toByte()
+                    bytes[i + 2] == 1.toByte() && bytes[i + 3] == 2.toByte() -> bytes[i + 8] = (bytes[i + 8].toInt() or 1).toByte()
+                }
+            }
+        }
+        zipFile.writeBytes(bytes)
+        kotlin.test.assertFailsWith<EncryptedZipException> { ArchiveReader.open(zipFile) }
+    }
+
+    /** macOS 打包附带的 __MACOSX/ 与 ._xxx 元数据不能混进图片列表。 */
+    @Test
+    fun macMetadataEntriesAreSkipped() = runBlocking {
+        val zipFile = File(tmpDir, "mac.zip")
+        ZipOutputStream(zipFile.outputStream(), Charsets.UTF_8).use { zos ->
+            for (name in listOf("book/001.jpg", "__MACOSX/book/._001.jpg", "book/._002.jpg")) {
+                zos.putNextEntry(ZipEntry(name))
+                zos.write(byteArrayOf(0))
+                zos.closeEntry()
+            }
+        }
+        ArchiveReader.open(zipFile).use { reader ->
+            assertEquals(listOf("001.jpg"), ImageScanner.scanArchive(zipFile, reader).map { it.name })
+        }
+    }
+
     /** UTF-8 zip 不该被回退路径破坏（回退只会多做一次打开，结果必须仍然正确）。 */
     @Test
     fun utf8ZipEntryNamesStillWork() = runBlocking {
@@ -461,6 +527,17 @@ class GalleryCoreTest {
 
         val limited = ImageScanner.scan(root, recursive = true, maxFiles = 10)
         assertEquals(10, limited.size)
+    }
+
+    @Test
+    fun naturalSortOrdersNumbersByValue() {
+        val names = listOf("10.jpg", "2.jpg", "1.jpg", "Page 02.png", "page 1.png", "第10话.jpg", "第9话.jpg", "01.jpg")
+        assertEquals(
+            listOf("01.jpg", "1.jpg", "2.jpg", "10.jpg", "page 1.png", "Page 02.png", "第9话.jpg", "第10话.jpg"),
+            names.sortedWith(NaturalOrder),
+        )
+        val big = "img99999999999999999999999.jpg"
+        assertTrue(naturalCompare("img2.jpg", big) < 0, "超长数字段不能溢出")
     }
 
     @Test
