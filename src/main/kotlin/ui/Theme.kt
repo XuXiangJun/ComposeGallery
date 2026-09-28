@@ -12,7 +12,6 @@ import androidx.compose.ui.unit.sp
 
 /** 查看器（恒定深色，不随主题）使用的强调色。 */
 val Accent = Color(0xFF4FC3F7)
-val Danger = Color(0xFFE57373)
 
 /**
  * 语义色 token：整个应用只通过 [GalleryColors] 取色，禁止在组件里散写十六进制颜色，
@@ -39,7 +38,6 @@ data class GalleryColors(
 
 /** 查看器（看图）始终使用深色环境，与主题无关，避免影响图片呈现。 */
 val ViewerScrim = Color(0xCC000000)
-val ViewerBackground = Color(0xFF000000)
 val ViewerPanelScrim = Color(0xE6000000)
 
 // Viewer 内固定色值（不随主题切换）：中灰用于次要文字 / 占位。
@@ -48,7 +46,6 @@ val ViewerSubtle = Color(0xFFBBBBBB)
 val ViewerCaption = Color(0xFF999999)
 val ViewerBody = Color(0xFFEEEEEE)
 val ViewerDim = Color(0xFF666666)
-val ViewerIconSurface = Color(0x88000000)
 val ViewerIcon = Color.White
 
 val DarkGalleryColors = GalleryColors(

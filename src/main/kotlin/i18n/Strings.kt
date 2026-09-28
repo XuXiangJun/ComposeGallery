@@ -1,7 +1,6 @@
 package gallery.i18n
 
 import androidx.compose.runtime.staticCompositionLocalOf
-import java.util.Locale
 
 data class Strings(val localeTag: String) {
     fun t(key: StringsKey, vararg args: Any): String {
@@ -11,11 +10,6 @@ data class Strings(val localeTag: String) {
 }
 
 val LocalStrings = staticCompositionLocalOf { Strings("zh") }
-
-object StringsDefaults {
-    val system: Strings
-        get() = Strings(if (Locale.getDefault().language == "en") "en" else "zh")
-}
 
 enum class StringsKey(val zh: String, val en: String) {
     // Toolbar
@@ -29,6 +23,7 @@ enum class StringsKey(val zh: String, val en: String) {
     SearchA11y("搜索图片", "Search images"),
     ClearSearch("清除搜索", "Clear search"),
     More("更多", "More"),
+    ThumbSize("缩略图大小", "Thumbnail size"),
 
     // Menu
     RecursiveOn("含子文件夹 ✓", "Include Subfolders ✓"),
@@ -38,6 +33,7 @@ enum class StringsKey(val zh: String, val en: String) {
     Theme("主题", "Theme"),
     Help("帮助", "Help"),
     Language("语言", "Language"),
+    LocaleSystem("跟随系统", "System"),
     LocaleZH("中文", "Chinese"),
     LocaleEN("English", "English"),
 
@@ -63,7 +59,11 @@ enum class StringsKey(val zh: String, val en: String) {
     Empty_NoImages("「%s」中没有找到图片", "No images found in \"%s\""),
     Empty_NoMatch("没有匹配「%s」的图片", "No images matching \"%s\""),
     SelectFolder("选择图片文件夹", "Select image folder"),
+    SelectArchive("选择压缩包", "Select archive"),
+    ArchiveFilter("压缩包 (*.zip, *.cbz, *.7z, *.cb7)", "Archives (*.zip, *.cbz, *.7z, *.cb7)"),
     Recent("最近打开", "Recently Opened"),
+    RecentFolder("文件夹", "Folder"),
+    RecentArchive("压缩包", "Archive"),
 
     // Bookshelf
     BookshelfTitle("书架", "Bookshelf"),
@@ -71,6 +71,14 @@ enum class StringsKey(val zh: String, val en: String) {
     BookshelfTotal("共 %d 本", "%d books"),
     BookshelfEmpty("书架是空的\n在图库中打开文件夹或压缩包后，点击「加入书架」即可收藏", "Bookshelf is empty\nOpen a folder or archive, then tap \"Add to Bookshelf\""),
     RemoveBook("移出书架", "Remove from Bookshelf"),
+    BookshelfSortRecent("按最近阅读", "Recently read"),
+    BookshelfSortName("按名称", "By name"),
+    BookMissing("路径已失效", "Missing"),
+    BookFinished("已读完", "Finished"),
+    RemoveRecent("从最近打开中移除", "Remove from recent"),
+    ClearRecent("清空", "Clear"),
+
+    ThumbnailFailed("无法加载缩略图", "Thumbnail unavailable"),
 
     // Viewer
     Loading("加载中…", "Loading…"),
@@ -81,6 +89,14 @@ enum class StringsKey(val zh: String, val en: String) {
     Fit("适应", "Fit"),
     Actual("1:1", "1:1"),
     OpenInFolder("在文件夹中显示", "Show in folder"),
+    OpenExternal("用默认程序打开", "Open with default app"),
+    Rotate("旋转", "Rotate"),
+    Copied("已复制到剪贴板", "Copied to clipboard"),
+    CopyFailed("复制失败", "Copy failed"),
+    DirectionLtr("左→右", "L→R"),
+    DirectionRtl("右→左", "R→L"),
+    WheelZoom("滚轮：缩放", "Wheel: zoom"),
+    WheelPage("滚轮：翻页", "Wheel: page"),
     Interval("%ds", "%ds"),
     Delete("删除", "Delete"),
     Info("信息", "Info"),
@@ -105,10 +121,24 @@ enum class StringsKey(val zh: String, val en: String) {
     HelpHelpDesc("显示本帮助", "Show this help"),
     HelpPrevNext("← / →", "← / →"),
     HelpPrevNextDesc("上一张 / 下一张", "Previous / Next"),
+    HelpPage("PgUp / PgDn", "PgUp / PgDn"),
+    HelpPageDesc("上一张 / 下一张", "Previous / Next"),
+    HelpHomeEnd("Home / End", "Home / End"),
+    HelpHomeEndDesc("第一张 / 最后一张", "First / Last image"),
+    HelpZoom("+ / - / 0 / 1", "+ / - / 0 / 1"),
+    HelpZoomDesc("放大 / 缩小 / 适应 / 1:1", "Zoom in / out / Fit / 1:1"),
+    HelpThumbZoom("Ctrl + 滚轮", "Ctrl + Wheel"),
+    HelpThumbZoomDesc("网格中调整缩略图大小", "Resize thumbnails in grid"),
     HelpClose("Esc", "Esc"),
     HelpCloseDesc("关闭大图", "Close viewer"),
     HelpDelete("Delete", "Delete"),
     HelpDeleteDesc("删除当前图片（优先移入回收站）", "Delete current image (move to trash if possible)"),
+    HelpRotate("R / Shift + R", "R / Shift + R"),
+    HelpRotateDesc("顺时针 / 逆时针旋转", "Rotate clockwise / counter-clockwise"),
+    HelpFlip("H", "H"),
+    HelpFlipDesc("水平翻转", "Flip horizontally"),
+    HelpCopy("Ctrl + C", "Ctrl + C"),
+    HelpCopyDesc("复制图片到剪贴板", "Copy image to clipboard"),
     HelpInfo("I", "I"),
     HelpInfoDesc("显示 / 隐藏图片信息", "Toggle image info"),
     HelpSlideshow("空格", "Space"),
@@ -128,20 +158,18 @@ enum class StringsKey(val zh: String, val en: String) {
     ArchiveEmpty("压缩包内没有找到图片", "No images found in archive"),
     FolderNotFound("文件夹不存在：%s", "Folder not found: %s"),
     RefreshFailed("刷新失败：%s", "Failed to refresh: %s"),
+    UnsupportedPath("无法打开：%s（只支持文件夹、zip / cbz / 7z / cb7 压缩包和图片）", "Cannot open %s (folders, zip / cbz / 7z / cb7 archives and images only)"),
+    EncryptedZipUnsupported("「%s」是加密的 zip，暂不支持（加密的 7z 可以输入密码打开）", "\"%s\" is an encrypted zip, which is not supported (encrypted 7z archives can be opened with a password)"),
+    PasswordTitle("需要密码", "Password Required"),
+    PasswordPrompt("「%s」已加密，请输入密码：", "\"%s\" is encrypted. Enter the password:"),
+    PasswordWrong("密码错误或压缩包已损坏，请重新输入「%s」的密码：", "Wrong password or damaged archive. Enter the password for \"%s\":"),
+    ScanTruncated("图片太多，只显示了前 %d 张", "Too many images; only the first %d are shown"),
+    DeleteFailed("无法删除「%s」（文件可能被占用或没有权限）", "Could not delete \"%s\" (file may be in use or access denied)"),
 
     // Window
     AppTitle("Compose Gallery", "Compose Gallery"),
 
     // A11y
-    A11ySlideshow("幻灯片", "Slideshow"),
-    A11yInfo("信息", "Information"),
-    A11yClose("关闭", "Close"),
-    A11yPrev("上一张", "Previous"),
-    A11yNext("下一张", "Next"),
-    A11yFit("适应", "Fit to screen"),
-    A11yActual("1:1", "Actual size"),
     A11yZoomIn("放大", "Zoom in"),
     A11yZoomOut("缩小", "Zoom out"),
-    A11yOpenInFolder("在文件夹中显示", "Show in folder"),
-    A11yDelete("删除", "Delete"),
 }

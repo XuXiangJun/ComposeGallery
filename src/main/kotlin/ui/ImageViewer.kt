@@ -1,6 +1,24 @@
 package gallery.ui
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.automirrored.filled.ExitToApp
+import androidx.compose.material.icons.filled.LocationOn
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.drawscope.withTransform
+import androidx.compose.ui.graphics.toAwtImage
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.vector.path
+import androidx.compose.ui.input.key.isCtrlPressed
+import androidx.compose.ui.input.key.isMetaPressed
+import androidx.compose.ui.input.key.isShiftPressed
+import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.pointerHoverIcon
+import gallery.copyImageToClipboard
+import gallery.openItemWithDefaultApp
+import java.awt.Toolkit
+import java.awt.image.BufferedImage
+import kotlinx.coroutines.delay
 import androidx.compose.foundation.background
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -34,21 +52,11 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Search
 import androidx.compose.runtime.Composable
-import gallery.ui.ViewerBackground
-import gallery.ui.ViewerBody
-import gallery.ui.ViewerCaption
-import gallery.ui.ViewerDim
-import gallery.ui.ViewerIcon
-import gallery.ui.ViewerIconSurface
-import gallery.ui.ViewerMuted
-import gallery.ui.ViewerPanelScrim
-import gallery.ui.ViewerScrim
-import gallery.ui.ViewerSubtle
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -57,19 +65,29 @@ import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.isCtrlPressed
 import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import gallery.ImageItem
+import gallery.ReadingDirection
+import gallery.WheelAction
 import gallery.ImageLoader
 import gallery.LoadedImage
 import gallery.formatBytes
@@ -114,10 +132,30 @@ class ZoomState {
     var baseW by mutableStateOf(0f)
     var baseH by mutableStateOf(0f)
 
+    /** 顺时针旋转角度（0 / 90 / 180 / 270）与水平翻转；只影响显示，不改文件。 */
+    var rotation by mutableStateOf(0)
+    var flipped by mutableStateOf(false)
+
     fun reset() {
         scale = 1f
         offsetX = 0f
         offsetY = 0f
+    }
+
+    /** 换图时调用：连旋转 / 翻转一起复位（双击「适应」只复位缩放，保留旋转）。 */
+    fun resetAll() {
+        reset()
+        rotation = 0
+        flipped = false
+    }
+
+    fun rotateBy(degrees: Int) {
+        rotation = ((rotation + degrees) % 360 + 360) % 360
+        reset()
+    }
+
+    fun toggleFlip() {
+        flipped = !flipped
     }
 
     /** 当前 [s] 缩放下图片左上角在视口中的位置。 */
@@ -185,6 +223,7 @@ class ZoomState {
         Offset((p.x - imageLeft(scale)) / scale, (p.y - imageTop(scale)) / scale)
 }
 
+@OptIn(ExperimentalComposeUiApi::class)
 @Composable
 fun ImageViewer(
     item: ImageItem,
@@ -202,16 +241,61 @@ fun ImageViewer(
     slideshow: Boolean,
     slideshowSeconds: Float,
     onSlideshowSecondsChange: (Float) -> Unit,
+    readingDirection: ReadingDirection,
+    onToggleReadingDirection: () -> Unit,
+    wheelAction: WheelAction,
+    onToggleWheelAction: () -> Unit,
+    /** 全屏时鼠标静止一会儿就自动隐藏工具栏和指针，看图不被遮挡。 */
+    fullscreen: Boolean = false,
 ) {
-    var loadedImage by remember(item) { mutableStateOf<LoadedImage?>(null) }
+    // 从右往左读（日漫）时，屏幕左侧 = 下一页。底栏箭头、点击区域都按屏幕方位走，
+    // 这样「点哪边就往哪边翻」和书页的物理方向一致。
+    val rtl = readingDirection == ReadingDirection.RTL
+    val onLeft = if (rtl) onNext else onPrev
+    val onRight = if (rtl) onPrev else onNext
+    val onWheelPage: ((Int) -> Unit)? =
+        if (wheelAction == WheelAction.PAGE) { d -> if (d > 0) onNext() else onPrev() } else null
+
+    // 缓存命中（前后预取过的页）时组合阶段就直接拿到图，不再先渲染一帧「加载中」再换图。
+    var loadedImage by remember(item) { mutableStateOf(ImageLoader.peekFull(item.source)) }
     var loadFailed by remember(item) { mutableStateOf(false) }
     val zoom = remember { ZoomState() }
     val focusRequester = remember { FocusRequester() }
+    var toast by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(toast) {
+        if (toast != null) {
+            delay(1500)
+            toast = null
+        }
+    }
+    var pointerIdle by remember { mutableStateOf(false) }
+    var moveTick by remember { mutableStateOf(0) }
+    LaunchedEffect(fullscreen, moveTick) {
+        pointerIdle = false
+        if (fullscreen) {
+            delay(AUTO_HIDE_DELAY_MS)
+            pointerIdle = true
+        }
+    }
+    val autoHidden = fullscreen && pointerIdle
+    val strings = LocalStrings.current
+
+    /** 当前显示的那一帧（动画取首帧），用于复制到剪贴板。 */
+    fun currentBitmap(): ImageBitmap? = when (val li = loadedImage) {
+        is LoadedImage.Static -> li.bitmap
+        is LoadedImage.Animated -> li.animation.frames.firstOrNull()
+        null -> null
+    }
+
+    fun copyCurrent() {
+        val b = currentBitmap() ?: return
+        toast = strings.t(if (copyImageToClipboard(b.toAwtImage())) StringsKey.Copied else StringsKey.CopyFailed)
+    }
+
     LaunchedEffect(item) {
-        zoom.reset()
-        loadedImage = null
+        zoom.resetAll()
         loadFailed = false
-        loadedImage = ImageLoader.loadFull(item.source)
+        if (loadedImage == null) loadedImage = ImageLoader.loadFull(item.source)
         // loadFull 内部 runCatching{}.getOrNull()：解码失败、文件被删、不可读都返回 null。
         // 不单独记一个失败态的话，这三种情况和「还在加载」在 UI 上完全一样 —— 静态图会永远转圈，
         // 而 GIF 分支早就有 LoadAnimationFailed 了，这里补上对齐。
@@ -219,14 +303,30 @@ fun ImageViewer(
         focusRequester.requestFocus()
     }
 
-    // 键盘（←/→/Esc/Delete/I/空格/F11/F1）统一由 App 的 onPreviewKeyEvent 处理：
-    // 它在窗口根部、预览阶段最先拿到事件，这里再处理一遍只会是死代码。
+    // 翻页 / 关闭 / 删除等键盘操作统一由 App 的 onPreviewKeyEvent 处理（窗口根部、预览阶段
+    // 最先拿到）。只有缩放快捷键在这里处理：缩放状态 [zoom] 属于查看器，App 碰不到，
+    // App 对这些键返回 false，事件就会继续传到获得焦点的这里。
     Box(
         Modifier
             .fillMaxSize()
             .background(Color.Black)
             .focusRequester(focusRequester)
-            .focusable(),
+            .focusable()
+            .onPointerEvent(PointerEventType.Move) { moveTick++ }
+            .pointerHoverIcon(if (autoHidden) BlankPointer else PointerIcon.Default)
+            .onKeyEvent { e ->
+                if (e.type != KeyEventType.KeyDown) return@onKeyEvent false
+                when (e.key) {
+                    Key.C -> if (e.isCtrlPressed || e.isMetaPressed) { copyCurrent(); true } else false
+                    Key.R -> { zoom.rotateBy(if (e.isShiftPressed) -90 else 90); true }
+                    Key.H -> { zoom.toggleFlip(); true }
+                    Key.Equals, Key.Plus, Key.NumPadAdd -> { zoom.zoomBy(1.25f); true }
+                    Key.Minus, Key.NumPadSubtract -> { zoom.zoomBy(1f / 1.25f); true }
+                    Key.Zero, Key.NumPad0 -> { zoom.toFit(); true }
+                    Key.One, Key.NumPad1 -> { zoom.to100(); true }
+                    else -> false
+                }
+            },
     ) {
         val li = loadedImage
         val s = LocalStrings.current
@@ -261,8 +361,11 @@ fun ImageViewer(
                     bitmap = li.bitmap,
                     zoom = zoom,
                     modifier = Modifier.fillMaxSize(),
-                    onTap = onToggleUi,
+                    onTapLeft = onLeft,
+                    onTapRight = onRight,
+                    onTapCenter = onToggleUi,
                     onDoubleTap = { zoom.toFit() },
+                    onWheelPage = onWheelPage,
                 )
             }
             li is LoadedImage.Animated -> {
@@ -279,7 +382,7 @@ fun ImageViewer(
 
                     LaunchedEffect(frames, delays, maxLoops) {
                         while (isActive && (maxLoops == null || loopsCompleted < maxLoops)) {
-                            kotlinx.coroutines.delay(delays.getOrElse(frameIndex) { 100 }.toLong())
+                            delay(delays.getOrElse(frameIndex) { 100 }.toLong())
                             val nextIndex = (frameIndex + 1) % frames.size
                             if (nextIndex == 0) loopsCompleted++
                             frameIndex = nextIndex
@@ -290,8 +393,11 @@ fun ImageViewer(
                         bitmap = frames[frameIndex],
                         zoom = zoom,
                         modifier = Modifier.fillMaxSize(),
-                        onTap = onToggleUi,
+                        onTapLeft = onLeft,
+                        onTapRight = onRight,
+                        onTapCenter = onToggleUi,
                         onDoubleTap = { zoom.toFit() },
+                        onWheelPage = onWheelPage,
                     )
                 }
             }
@@ -303,7 +409,20 @@ fun ImageViewer(
             InfoPanel(item, loadedImage, onClose = onToggleInfo)
         }
 
-        if (showUi) {
+        toast?.let { msg ->
+            Text(
+                msg,
+                color = Color.White,
+                fontSize = 13.sp,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = ViewerBarInset + 16.dp)
+                    .background(ViewerPanelScrim, RoundedCornerShape(6.dp))
+                    .padding(horizontal = 14.dp, vertical = 8.dp),
+            )
+        }
+
+        if (showUi && !autoHidden) {
             ViewerTopBar(
                 name = item.name,
                 index = index,
@@ -314,13 +433,19 @@ fun ImageViewer(
                 onClose = onClose,
             )
             ViewerBottomBar(
-                onPrev = onPrev,
-                onNext = onNext,
+                onLeft = onLeft,
+                onRight = onRight,
+                readingDirection = readingDirection,
+                onToggleReadingDirection = onToggleReadingDirection,
+                wheelAction = wheelAction,
+                onToggleWheelAction = onToggleWheelAction,
                 onFit = { zoom.toFit() },
                 onActual = { zoom.to100() },
                 onZoomIn = { zoom.zoomBy(1.25f) },
                 onZoomOut = { zoom.zoomBy(1f / 1.25f) },
                 onOpenInFolder = { openInFileManager(item.containerFile) },
+                onOpenExternal = { openItemWithDefaultApp(item) },
+                onRotate = { zoom.rotateBy(90) },
                 onDelete = onDelete,
                 canDelete = item.file != null,
                 slideshowSeconds = slideshowSeconds,
@@ -357,7 +482,7 @@ private fun BoxScope.ViewerTopBar(
         )
         Text("${index + 1} / $total", color = ViewerSubtle, fontSize = 13.sp)
         IconButton(onClick = onToggleSlideshow) {
-            Icon(Icons.Filled.PlayArrow, s.t(StringsKey.SlideShow), tint = if (slideshow) Accent else ViewerIcon)
+            Icon(if (slideshow) PauseIcon else Icons.Filled.PlayArrow, s.t(StringsKey.SlideShow), tint = if (slideshow) Accent else ViewerIcon)
         }
         IconButton(onClick = onToggleInfo) {
             Icon(Icons.Filled.Info, s.t(StringsKey.Info), tint = ViewerIcon)
@@ -370,13 +495,19 @@ private fun BoxScope.ViewerTopBar(
 
 @Composable
 private fun BoxScope.ViewerBottomBar(
-    onPrev: () -> Unit,
-    onNext: () -> Unit,
+    onLeft: () -> Unit,
+    onRight: () -> Unit,
+    readingDirection: ReadingDirection,
+    onToggleReadingDirection: () -> Unit,
+    wheelAction: WheelAction,
+    onToggleWheelAction: () -> Unit,
     onFit: () -> Unit,
     onActual: () -> Unit,
     onZoomIn: () -> Unit,
     onZoomOut: () -> Unit,
     onOpenInFolder: () -> Unit,
+    onOpenExternal: () -> Unit,
+    onRotate: () -> Unit,
     onDelete: () -> Unit,
     canDelete: Boolean = true,
     slideshowSeconds: Float,
@@ -390,20 +521,41 @@ private fun BoxScope.ViewerBottomBar(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        IconButton(onClick = onPrev) {
-            Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, s.t(StringsKey.Prev), tint = ViewerIcon)
+        val rtl = readingDirection == ReadingDirection.RTL
+        IconButton(onClick = onLeft) {
+            Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, s.t(if (rtl) StringsKey.Next else StringsKey.Prev), tint = ViewerIcon)
         }
-        IconButton(onClick = onNext) {
-            Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, s.t(StringsKey.Next), tint = ViewerIcon)
+        IconButton(onClick = onRight) {
+            Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, s.t(if (rtl) StringsKey.Prev else StringsKey.Next), tint = ViewerIcon)
+        }
+        TextButton(onClick = onToggleReadingDirection) {
+            Text(s.t(if (rtl) StringsKey.DirectionRtl else StringsKey.DirectionLtr), color = ViewerIcon, fontSize = 12.sp)
+        }
+        TextButton(onClick = onToggleWheelAction) {
+            Text(
+                s.t(if (wheelAction == WheelAction.PAGE) StringsKey.WheelPage else StringsKey.WheelZoom),
+                color = ViewerIcon,
+                fontSize = 12.sp,
+            )
         }
         Spacer(Modifier.width(8.dp))
         TextButton(onClick = onFit) { Text(s.t(StringsKey.Fit), color = ViewerIcon) }
         TextButton(onClick = onActual) { Text(s.t(StringsKey.Actual), color = ViewerIcon) }
-        TextButton(onClick = onZoomOut) { Text("−", color = ViewerIcon, fontSize = 16.sp) }
-        TextButton(onClick = onZoomIn) { Text("+", color = ViewerIcon, fontSize = 16.sp) }
+        TextButton(onClick = onZoomOut, modifier = Modifier.semantics { contentDescription = s.t(StringsKey.A11yZoomOut) }) {
+            Text("−", color = ViewerIcon, fontSize = 16.sp)
+        }
+        TextButton(onClick = onZoomIn, modifier = Modifier.semantics { contentDescription = s.t(StringsKey.A11yZoomIn) }) {
+            Text("+", color = ViewerIcon, fontSize = 16.sp)
+        }
+        TextButton(onClick = onRotate, modifier = Modifier.semantics { contentDescription = s.t(StringsKey.Rotate) }) {
+            Text("⟳", color = ViewerIcon, fontSize = 16.sp)
+        }
         Spacer(Modifier.weight(1f))
         IconButton(onClick = onOpenInFolder) {
-            Icon(Icons.Filled.Search, s.t(StringsKey.OpenInFolder), tint = ViewerIcon)
+            Icon(Icons.Filled.LocationOn, s.t(StringsKey.OpenInFolder), tint = ViewerIcon)
+        }
+        IconButton(onClick = onOpenExternal) {
+            Icon(Icons.AutoMirrored.Filled.ExitToApp, s.t(StringsKey.OpenExternal), tint = ViewerIcon)
         }
         // 拖动过程中只更新本地状态，松手（onValueChangeFinished）才回调上层 —— 上层会写盘，
         // 这样避免滑块每移动一格就写一次 settings.json。
@@ -476,21 +628,63 @@ private fun InfoRow(label: String, value: String) {
     }
 }
 
+/** 全屏下鼠标静止多久后隐藏工具栏和指针。 */
+private const val AUTO_HIDE_DELAY_MS = 2500L
+
+/** 透明指针（全屏自动隐藏时用）。懒加载：无头环境（单元测试）里不会碰 AWT Toolkit。 */
+private val BlankPointer: PointerIcon by lazy {
+    PointerIcon(
+        Toolkit.getDefaultToolkit().createCustomCursor(
+            BufferedImage(16, 16, BufferedImage.TYPE_INT_ARGB), java.awt.Point(0, 0), "blank",
+        ),
+    )
+}
+
+/** material-icons-core 里没有 Pause，自己画一个（两条竖杠）。 */
+private val PauseIcon: ImageVector by lazy {
+    ImageVector.Builder("Pause", 24.dp, 24.dp, 24f, 24f).apply {
+        path(fill = SolidColor(Color.Black)) {
+            moveTo(6f, 5f); horizontalLineTo(10f); verticalLineTo(19f); horizontalLineTo(6f); close()
+            moveTo(14f, 5f); horizontalLineTo(18f); verticalLineTo(19f); horizontalLineTo(14f); close()
+        }
+    }.build()
+}
+
+/** 滚轮翻页的最小间隔：触控板一次滑动会连发几十个小 delta，不节流就会一口气翻过好几页。 */
+private const val WHEEL_PAGE_INTERVAL_MS = 250L
+
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
 private fun ZoomableImage(
     bitmap: ImageBitmap,
     zoom: ZoomState,
     modifier: Modifier = Modifier,
-    onTap: () -> Unit = {},
+    onTapLeft: () -> Unit = {},
+    onTapRight: () -> Unit = {},
+    onTapCenter: () -> Unit = {},
     onDoubleTap: () -> Unit = {},
+    /** 非 null 时滚轮用来翻页（参数 +1 = 下一页），按住 Ctrl 仍是缩放；null 时滚轮缩放。 */
+    onWheelPage: ((Int) -> Unit)? = null,
 ) {
+    // pointerInput(Unit) 里的协程不会随重组重启，直接捕获回调会一直用首次组合时的旧 lambda
+    // （切换阅读方向后点击区域不跟着变）。经 rememberUpdatedState 读永远是最新的。
+    val tapLeft by rememberUpdatedState(onTapLeft)
+    val tapRight by rememberUpdatedState(onTapRight)
+    val tapCenter by rememberUpdatedState(onTapCenter)
+    val doubleTap by rememberUpdatedState(onDoubleTap)
+    val wheelPage by rememberUpdatedState(onWheelPage)
+    val lastWheelPage = remember { longArrayOf(0L) }
+
     BoxWithConstraints(modifier) {
         val boxW = constraints.maxWidth.toFloat()
         val boxH = constraints.maxHeight.toFloat()
-        val fit = remember(bitmap, boxW, boxH) {
-            if (bitmap.width > 0 && bitmap.height > 0 && boxW > 0 && boxH > 0) {
-                min(boxW / bitmap.width, boxH / bitmap.height)
+        // 旋转 90° / 270° 时，按「转过之后」的宽高来适应视口。
+        val swapped = zoom.rotation % 180 != 0
+        val bw = if (swapped) bitmap.height else bitmap.width
+        val bh = if (swapped) bitmap.width else bitmap.height
+        val fit = remember(bitmap, boxW, boxH, swapped) {
+            if (bw > 0 && bh > 0 && boxW > 0 && boxH > 0) {
+                min(boxW / bw, boxH / bh)
             } else {
                 1f
             }
@@ -502,8 +696,8 @@ private fun ZoomableImage(
             zoom.fit = fit
             zoom.viewportW = boxW
             zoom.viewportH = boxH
-            zoom.baseW = bitmap.width * fit
-            zoom.baseH = bitmap.height * fit
+            zoom.baseW = bw * fit
+            zoom.baseH = bh * fit
         }
 
         val drawnW = zoom.baseW * zoom.scale
@@ -523,7 +717,15 @@ private fun ZoomableImage(
                 .onPointerEvent(PointerEventType.Scroll) { event ->
                     val change = event.changes.first()
                     val dy = change.scrollDelta.y
-                    if (dy != 0f) {
+                    if (dy == 0f) return@onPointerEvent
+                    val page = wheelPage
+                    if (page != null && !event.keyboardModifiers.isCtrlPressed) {
+                        val now = System.currentTimeMillis()
+                        if (now - lastWheelPage[0] >= WHEEL_PAGE_INTERVAL_MS) {
+                            lastWheelPage[0] = now
+                            page(if (dy > 0) 1 else -1)
+                        }
+                    } else {
                         // 向上滚（scrollDelta.y 为负）= 放大，与主流看图软件一致；
                         // 想反过来只需把这里的判断改成 dy > 0。
                         zoom.zoomAt(if (dy < 0) 1.15f else 1f / 1.15f, change.position)
@@ -531,17 +733,35 @@ private fun ZoomableImage(
                 }
                 .pointerInput(Unit) {
                     detectTapGestures(
-                        onTap = { onTap() },
-                        onDoubleTap = { onDoubleTap() },
+                        // 左右各三分之一是翻页区，中间点一下显示 / 隐藏工具栏。
+                        onTap = { pos ->
+                            val w = size.width
+                            when {
+                                pos.x < w / 3f -> tapLeft()
+                                pos.x > w * 2f / 3f -> tapRight()
+                                else -> tapCenter()
+                            }
+                        },
+                        onDoubleTap = { doubleTap() },
                     )
                 },
         ) {
-            drawImage(
-                image = bitmap,
-                dstOffset = IntOffset(imgLeft.roundToInt(), imgTop.roundToInt()),
-                dstSize = IntSize(max(1, drawnW.roundToInt()), max(1, drawnH.roundToInt())),
-                filterQuality = FilterQuality.Medium,
-            )
+            // 以图片中心为轴：先按未旋转的尺寸摆好，再旋转；翻转放在最外层，
+            // 这样「水平翻转」永远是屏幕上的左右翻，而不是图片自身坐标系里的翻。
+            val center = Offset(imgLeft + drawnW / 2f, imgTop + drawnH / 2f)
+            val dw = if (swapped) drawnH else drawnW
+            val dh = if (swapped) drawnW else drawnH
+            withTransform({
+                if (zoom.flipped) scale(-1f, 1f, center)
+                rotate(zoom.rotation.toFloat(), center)
+            }) {
+                drawImage(
+                    image = bitmap,
+                    dstOffset = IntOffset((center.x - dw / 2f).roundToInt(), (center.y - dh / 2f).roundToInt()),
+                    dstSize = IntSize(max(1, dw.roundToInt()), max(1, dh.roundToInt())),
+                    filterQuality = FilterQuality.Medium,
+                )
+            }
         }
     }
 }

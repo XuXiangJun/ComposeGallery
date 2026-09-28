@@ -1,6 +1,8 @@
 package gallery.ui
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.draganddrop.dragAndDropTarget
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.rememberScrollState
@@ -13,7 +15,11 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.material.AlertDialog
+import androidx.compose.material.OutlinedTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.material.Text
 import androidx.compose.material.TextButton
 import androidx.compose.runtime.Composable
@@ -24,7 +30,12 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draganddrop.DragAndDropEvent
+import androidx.compose.ui.draganddrop.DragAndDropTarget
+import androidx.compose.ui.draganddrop.DragData
+import androidx.compose.ui.draganddrop.dragData
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.input.key.Key
@@ -35,11 +46,14 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.unit.dp
+import gallery.AppLog
 import gallery.AppState
 import gallery.ArchiveReader
 import gallery.BookEntry
+import gallery.EncryptedZipException
 import gallery.ImageItem
 import gallery.ImageScanner
+import gallery.ReadingDirection
 import gallery.RecentEntry
 import gallery.ThemeMode
 import gallery.i18n.LocalStrings
@@ -51,20 +65,48 @@ import gallery.pickFolder
 import gallery.sortImages
 import java.awt.Component
 import java.io.File
+import org.apache.commons.compress.PasswordRequiredException
+import java.net.URI
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
+/** 等待用户输入密码的加密压缩包，以及输完之后照原样重试所需的参数。 */
+private data class PasswordRequest(
+    val file: File,
+    val resume: Boolean,
+    val recordRecent: Boolean,
+    val wrongPassword: Boolean,
+)
+
+/** 当前正在进行的图集加载；新的加载开始前取消它（见 App 里的 launchLoad）。 */
+private class LoadSlot {
+    var job: Job? = null
+}
+
+@OptIn(ExperimentalComposeUiApi::class, ExperimentalFoundationApi::class)
 @Composable
 fun App(
     state: AppState,
     onToggleFullscreen: () -> Unit,
     /** 文件对话框的父窗口（ComposeWindow 即 AWT Component）；为 null 时对话框不附着主窗口。 */
     dialogParent: Component? = null,
+    isFullscreen: Boolean = false,
 ) {
     val scope = rememberCoroutineScope()
     val focusRequester = remember { FocusRequester() }
     var pendingDelete by remember { mutableStateOf<ImageItem?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
+    val loadSlot = remember { LoadSlot() }
+    var passwordRequest by remember { mutableStateOf<PasswordRequest?>(null) }
+
+    // 网格滚动状态提到这里：GalleryScreen 在查看器打开时会离开组合，状态放在它内部就会被
+    // 销毁，关掉查看器后网格回到顶部。按图集路径区分，换图集时从顶部开始。
+    val gridState = remember(state.locationPath) { LazyGridState() }
 
     val strings = remember(state.localeTag) { Strings(state.localeTag) }
     CompositionLocalProvider(LocalStrings provides strings) {
@@ -75,126 +117,176 @@ fun App(
         ThemeMode.DARK -> true
     }
 
-    // 图集加载完成后恢复/重置查看进度。
-    fun finishLoad() {
-        if (state.resumeFromBook) {
-            val p = state.progressFor(state.locationPath)
-            state.selectedIndex = if (state.images.isNotEmpty()) p.coerceIn(0, state.images.size - 1) else -1
-        } else {
-            state.selectedIndex = -1
-        }
-    }
+    // ---- 加载图集 ----
+    //
+    // 所有入口（工具栏 / 书架 / 最近打开 / 刷新）都走 [launchLoad]：
+    // - 新的加载开始前取消上一个。否则先开 A、马上开 B，A 扫得慢、最后才完成时，就会出现
+    //   「folder = B、images = A 的内容」，书架进度也跟着写错条目；
+    // - 打开压缩包、扫描目录都在 IO 线程上做完，**全部成功之后**才一次性改 state
+    //   （见 [commitLocation]）。失败或被取消时 state 保持原样，不会留下「archive 已清空、
+    //   网格里却还是旧压缩包条目」这种半截状态。
 
-    suspend fun rescan() {
-        val f = state.folder ?: return
-        state.loading = true
-        try {
-            state.images = sortImages(ImageScanner.scan(f, state.recursive), state.sortMode, state.sortDirection)
-            finishLoad()
-        } finally {
-            state.loading = false
+    fun launchLoad(block: suspend () -> Unit) {
+        loadSlot.job?.cancel()
+        val job = scope.launch(start = CoroutineStart.LAZY) {
+            state.loading = true
+            try {
+                block()
+            } finally {
+                // 被新的加载取消时不要把 loading 关掉：新的那个还在跑。
+                if (loadSlot.job === coroutineContext[Job]) state.loading = false
+            }
         }
+        loadSlot.job = job
+        job.start()
     }
-
-    suspend fun rescanArchive(archiveFile: File) {
-        state.loading = true
-        try {
-            val newReader = ArchiveReader.open(archiveFile)
-            val items = ImageScanner.scanArchive(archiveFile, newReader)
-            state.archiveReader?.close()
-            state.archiveReader = newReader
-            state.images = sortImages(items, state.sortMode, state.sortDirection)
-            finishLoad()
-        } catch (t: Throwable) {
-            error = strings.t(StringsKey.RefreshFailed, t.message ?: t.toString())
-        } finally {
-            state.loading = false
-        }
-    }
-
-    // ---- 打开位置：四个入口（工具栏 / 书架 / 最近打开）共用下面两个函数 ----
 
     /**
-     * 打开压缩包并载入图片列表，成功返回 true。
-     * [resume] 是否恢复书架进度；[recordRecent] 是否记入「最近打开」。
+     * 把新图集提交到 state 上。调用前所有可能失败 / 挂起的工作都已完成，这里只做同步赋值，
+     * 中间不会被取消打断。
      */
-    suspend fun loadArchive(file: File, resume: Boolean, recordRecent: Boolean): Boolean {
-        val reader = try {
-            ArchiveReader.open(file)
-        } catch (t: Throwable) {
-            error = strings.t(StringsKey.OpenArchiveFailed, t.message ?: t.toString())
-            return false
-        }
-        val items = ImageScanner.scanArchive(file, reader)
-        if (items.isEmpty()) {
-            reader.close()
-            error = strings.t(StringsKey.ArchiveEmpty)
-            return false
-        }
-
+    fun commitLocation(
+        folder: File?,
+        archive: File?,
+        reader: ArchiveReader?,
+        items: List<ImageItem>,
+        resume: Boolean,
+        password: CharArray? = null,
+    ) {
         // 先把上一个图集的进度存下来 —— 必须在下面改动 archive/folder 之前。
         // 放到后面的话，saveCurrentProgress() 会拿到「新图集的 id + 上一次的 selectedIndex」，
         // 把书架上另一个条目的 progress/total 一起冲掉。
         state.saveCurrentProgress()
-
         state.archiveReader?.close()
         state.archiveReader = reader
-        state.archive = file
-        state.folder = null
-        state.resumeFromBook = resume
+        state.archivePassword = password
+        state.archive = archive
+        state.folder = folder
         state.searchQuery = ""
         // 直接重置查看态而不调 closeViewer()：它内部还会用（已经是新的）locationPath 再存一次进度。
         state.selectedIndex = -1
         state.slideshow = false
+        state.lastViewed = null
         state.images = sortImages(items, state.sortMode, state.sortDirection)
-        finishLoad()
-        if (recordRecent) state.addRecent(file.absolutePath, file.name, "archive")
-        return true
+        state.selectedIndex = if (resume) state.resumeIndexFor(state.locationPath, state.images) else -1
+        state.syncBook(state.locationPath, touch = resume)
     }
 
-    /** 打开文件夹并载入图片列表，成功返回 true。 */
-    suspend fun loadFolder(dir: File, resume: Boolean, recordRecent: Boolean): Boolean {
+    /**
+     * 打开压缩包并载入图片列表。[resume] 是否恢复书架进度；[recordRecent] 是否记入「最近打开」；
+     * [password] 是用户为加密 7z 输入的密码。需要密码时弹出密码框，确认后带着密码重来一遍。
+     */
+    suspend fun loadArchive(file: File, resume: Boolean, recordRecent: Boolean, password: CharArray? = null) {
+        val reader = try {
+            withContext(Dispatchers.IO) { ArchiveReader.open(file, password) }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: PasswordRequiredException) {
+            passwordRequest = PasswordRequest(file, resume, recordRecent, wrongPassword = password != null)
+            return
+        } catch (e: EncryptedZipException) {
+            error = strings.t(StringsKey.EncryptedZipUnsupported, file.name)
+            return
+        } catch (t: Throwable) {
+            // 带了密码还打不开，最常见的原因是密码错了（7z 解出来的头部校验失败）：再问一次。
+            if (password != null) {
+                passwordRequest = PasswordRequest(file, resume, recordRecent, wrongPassword = true)
+                return
+            }
+            AppLog.warn("打开压缩包失败：${file.absolutePath}", t)
+            error = strings.t(StringsKey.OpenArchiveFailed, t.message ?: t.toString())
+            return
+        }
+        try {
+            val items = ImageScanner.scanArchive(file, reader)
+            if (items.isEmpty()) {
+                reader.close()
+                error = strings.t(StringsKey.ArchiveEmpty)
+                return
+            }
+            commitLocation(folder = null, archive = file, reader = reader, items = items, resume = resume, password = password)
+        } catch (t: Throwable) {
+            // 被取消（或扫描失败）时新 reader 还没交给 state，必须自己关掉。
+            reader.close()
+            if (t is CancellationException) throw t
+            AppLog.warn("打开压缩包失败：${file.absolutePath}", t)
+            error = strings.t(StringsKey.OpenArchiveFailed, t.message ?: t.toString())
+            return
+        }
+        if (recordRecent) state.addRecent(file.absolutePath, file.name, "archive")
+    }
+
+    /** 打开文件夹并载入图片列表；参数含义同 [loadArchive]。 */
+    suspend fun loadFolder(dir: File, resume: Boolean, recordRecent: Boolean) {
         if (!dir.isDirectory) {
             error = strings.t(StringsKey.FolderNotFound, dir.absolutePath)
-            return false
+            return
         }
-        // 先存上一个图集的进度（此刻 locationPath 还指向它），再切位置 —— 说明同 loadArchive。
-        state.saveCurrentProgress()
-        // 关掉上一个归档的 reader。它内部会再存一次进度，但位置没变、内容没变，是幂等空操作。
-        state.closeArchive()
-        state.folder = dir
-        state.resumeFromBook = resume
-        state.searchQuery = ""
-        state.selectedIndex = -1
-        state.slideshow = false
-        state.loading = true
-        try {
-            state.images = sortImages(ImageScanner.scan(dir, state.recursive), state.sortMode, state.sortDirection)
-        } finally {
-            state.loading = false
+        val items = try {
+            ImageScanner.scan(dir, state.recursive)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (t: Throwable) {
+            AppLog.warn("扫描文件夹失败：${dir.absolutePath}", t)
+            error = strings.t(StringsKey.OpenFolderFailed, t.message ?: t.toString())
+            return
         }
-        finishLoad()
+        commitLocation(folder = dir, archive = null, reader = null, items = items, resume = resume)
         if (recordRecent) state.addRecent(dir.absolutePath, dir.name, "folder")
-        return true
+        if (items.size >= ImageScanner.MAX_FILES) error = strings.t(StringsKey.ScanTruncated, ImageScanner.MAX_FILES)
+    }
+
+    /**
+     * 重新扫描当前图集（F5 / 切换子文件夹开关）。只换图片列表，保留搜索词与网格位置，
+     * 也不再恢复书架进度 —— 否则从书架打开过的图集每按一次 F5 都会自己弹进查看器。
+     */
+    suspend fun rescanCurrent() {
+        val arch = state.archive
+        val dir = state.folder
+        try {
+            if (arch != null) {
+                val newReader = withContext(Dispatchers.IO) { ArchiveReader.open(arch, state.archivePassword) }
+                val items = try {
+                    ImageScanner.scanArchive(arch, newReader)
+                } catch (t: Throwable) {
+                    newReader.close()
+                    throw t
+                }
+                // 期间用户可能已经切走了；那就不要把旧图集的结果写回来。
+                if (state.archive != arch) { newReader.close(); return }
+                state.archiveReader?.close()
+                state.archiveReader = newReader
+                state.images = sortImages(items, state.sortMode, state.sortDirection)
+            } else if (dir != null) {
+                val items = ImageScanner.scan(dir, state.recursive)
+                if (state.folder != dir) return
+                state.images = sortImages(items, state.sortMode, state.sortDirection)
+                if (items.size >= ImageScanner.MAX_FILES) error = strings.t(StringsKey.ScanTruncated, ImageScanner.MAX_FILES)
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (t: Throwable) {
+            AppLog.warn("刷新失败：${state.locationPath}", t)
+            error = strings.t(StringsKey.RefreshFailed, t.message ?: t.toString())
+        }
     }
 
     fun openFolder() {
         scope.launch {
-            pickFolder(dialogParent)?.let { loadFolder(it, resume = false, recordRecent = true) }
+            pickFolder(dialogParent, strings.t(StringsKey.SelectFolder))?.let { launchLoad { loadFolder(it, resume = false, recordRecent = true) } }
         }
     }
 
     fun openArchive() {
         scope.launch {
-            pickArchive(dialogParent)?.let { loadArchive(it, resume = false, recordRecent = true) }
+            pickArchive(dialogParent, strings.t(StringsKey.SelectArchive), strings.t(StringsKey.ArchiveFilter))?.let { launchLoad { loadArchive(it, resume = false, recordRecent = true) } }
         }
     }
 
+    /** 从书架进入：恢复这本书的阅读进度（上一个图集的进度在 commitLocation 里保存）。 */
     fun openBook(book: BookEntry) {
-        scope.launch {
-            // 从书架进入：先关掉当前归档（并保存进度），再恢复这本书的阅读进度。
-            state.closeArchive()
-            state.showBookshelf = false
+        state.showBookshelf = false
+        launchLoad {
             if (book.type == "archive") {
                 loadArchive(File(book.path), resume = true, recordRecent = false)
             } else {
@@ -203,23 +295,43 @@ fun App(
         }
     }
 
-    /** 从「最近打开」进入某个位置（不恢复书架进度）。 */
+    /** 从「最近打开」进入某个位置（不恢复书架进度），并把它挪到最近列表的最前面。 */
     fun openRecent(entry: RecentEntry) {
-        scope.launch {
-            state.closeArchive()
-            state.showBookshelf = false
+        state.showBookshelf = false
+        launchLoad {
             if (entry.type == "archive") {
-                loadArchive(File(entry.path), resume = false, recordRecent = false)
+                loadArchive(File(entry.path), resume = false, recordRecent = true)
             } else {
-                loadFolder(File(entry.path), resume = false, recordRecent = false)
+                loadFolder(File(entry.path), resume = false, recordRecent = true)
             }
         }
     }
 
     fun refresh() {
-        scope.launch {
-            val arch = state.archive
-            if (arch != null) rescanArchive(arch) else rescan()
+        launchLoad { rescanCurrent() }
+    }
+
+    /**
+     * 打开任意路径（命令行参数 / 拖进窗口）：文件夹、压缩包直接打开；单张图片则打开它所在
+     * 的文件夹，并直接在查看器里显示这张图。
+     */
+    fun openPath(file: File) {
+        state.showBookshelf = false
+        when {
+            file.isDirectory -> launchLoad { loadFolder(file, resume = false, recordRecent = true) }
+            file.isFile && ArchiveReader.isSupported(file) ->
+                launchLoad { loadArchive(file, resume = false, recordRecent = true) }
+            file.isFile && file.extension.lowercase() in ImageScanner.EXTENSIONS -> {
+                val dir = file.absoluteFile.parentFile ?: return
+                launchLoad {
+                    loadFolder(dir, resume = false, recordRecent = true)
+                    if (state.folder == dir) {
+                        val idx = state.images.indexOfFirst { it.file?.absoluteFile == file.absoluteFile }
+                        if (idx >= 0) state.selectedIndex = idx
+                    }
+                }
+            }
+            else -> error = strings.t(StringsKey.UnsupportedPath, file.absolutePath)
         }
     }
 
@@ -263,11 +375,17 @@ fun App(
                 else -> false
             }
         }
+        val forward = if (state.readingDirection == ReadingDirection.RTL) -1 else 1
         return when (e.key) {
             Key.Escape -> { state.closeViewer(); true }
             // 翻页只在「搜索过滤后的可见列表」内移动，避免跳到被过滤掉的图片。
-            Key.DirectionRight -> { state.selectedIndex = state.step(1); true }
-            Key.DirectionLeft -> { state.selectedIndex = state.step(-1); true }
+            // 从右往左读时 ← 是下一页（和书页的物理方向一致）。
+            Key.DirectionRight -> { state.selectedIndex = state.step(forward); true }
+            Key.DirectionLeft -> { state.selectedIndex = state.step(-forward); true }
+            Key.PageDown -> { state.selectedIndex = state.step(1); true }
+            Key.PageUp -> { state.selectedIndex = state.step(-1); true }
+            Key.MoveHome -> { state.firstVisibleIndex().takeIf { it >= 0 }?.let { state.selectedIndex = it }; true }
+            Key.MoveEnd -> { state.lastVisibleIndex().takeIf { it >= 0 }?.let { state.selectedIndex = it }; true }
             Key.Delete -> { deleteCurrent(); true }
             Key.I -> { state.showInfo = !state.showInfo; true }
             Key.Spacebar -> { state.slideshow = !state.slideshow; true }
@@ -308,6 +426,25 @@ fun App(
         focusRequester.requestFocus()
     }
 
+    LaunchedEffect(state.pendingOpen) {
+        val f = state.pendingOpen ?: return@LaunchedEffect
+        state.pendingOpen = null
+        openPath(f)
+    }
+
+    val dropTarget = remember {
+        object : DragAndDropTarget {
+            override fun onDrop(event: DragAndDropEvent): Boolean {
+                val files = (event.dragData() as? DragData.FilesList)?.readFiles().orEmpty()
+                // readFiles() 给的是 file: URI；只取第一个（一次打开一个图集）。
+                val first = files.firstNotNullOfOrNull { runCatching { File(URI(it)) }.getOrNull() }
+                    ?: return false
+                state.pendingOpen = first
+                return true
+            }
+        }
+    }
+
     GalleryTheme(isDark) {
         Box(
             Modifier
@@ -315,7 +452,11 @@ fun App(
                 .background(LocalGalleryColors.current.background)
                 .focusRequester(focusRequester)
                 .focusable()
-                .onPreviewKeyEvent { handleKey(it) },
+                .onPreviewKeyEvent { handleKey(it) }
+                .dragAndDropTarget(
+                    shouldStartDragAndDrop = { it.dragData() is DragData.FilesList },
+                    target = dropTarget,
+                ),
         ) {
             val current = state.current
             when {
@@ -341,21 +482,27 @@ fun App(
                     slideshow = state.slideshow,
                     slideshowSeconds = state.slideshowSeconds,
                     onSlideshowSecondsChange = { state.updateSlideshowSeconds(it) },
+                    readingDirection = state.readingDirection,
+                    onToggleReadingDirection = { state.toggleReadingDirection() },
+                    wheelAction = state.wheelAction,
+                    onToggleWheelAction = { state.toggleWheelAction() },
+                    fullscreen = isFullscreen,
                 )
                 else -> GalleryScreen(
                     folderName = state.locationName,
                     images = state.images,
                     sortMode = state.sortMode,
                     sortDirection = state.sortDirection,
-                    onSortChange = { state.sortMode = it },
+                    onSortChange = { state.updateSortMode(it) },
                     onToggleSortDirection = { state.toggleSortDirection() },
                     searchQuery = state.searchQuery,
                     onSearchChange = { state.searchQuery = it },
                     thumbSize = state.thumbSize,
                     onThumbSizeChange = { state.thumbSize = it },
+                    onThumbSizeChangeFinished = { state.persistThumbSize() },
                     recursive = state.recursive,
                     onRecursiveChange = {
-                        state.recursive = it
+                        state.updateRecursive(it)
                         refresh()
                     },
                     loading = state.loading,
@@ -377,10 +524,14 @@ fun App(
                     themeMode = state.themeMode,
                     onSetTheme = { state.updateThemeMode(it) },
                     onHelp = { state.showHelp = true },
+                    locale = state.locale,
                     onLocaleChange = { state.updateLocale(it) },
                     recent = state.recent,
                     onOpenRecent = { openRecent(it) },
-                    selectedItem = state.current.takeIf { state.selectedIndex >= 0 },
+                    onRemoveRecent = { state.removeRecent(it.path) },
+                    onClearRecent = { state.clearRecent() },
+                    gridState = gridState,
+                    lastViewed = state.lastViewed,
                 )
             }
         }
@@ -392,9 +543,13 @@ fun App(
                 text = { Text(strings.t(StringsKey.ConfirmDeleteText, item.name)) },
                 confirmButton = {
                     TextButton(onClick = {
-                        item.file?.delete()
-                        removeItem(item)
                         pendingDelete = null
+                        // delete() 失败（只读 / 被占用 / 权限不足）时图片还在磁盘上，不能从列表里拿掉。
+                        if (item.file?.delete() == true) {
+                            removeItem(item)
+                        } else {
+                            error = strings.t(StringsKey.DeleteFailed, item.name)
+                        }
                     }) { Text(strings.t(StringsKey.DeleteConfirm)) }
                 },
                 dismissButton = {
@@ -417,6 +572,17 @@ fun App(
         if (state.showHelp) {
             HelpDialog(onDismiss = { state.showHelp = false })
         }
+
+        passwordRequest?.let { req ->
+            PasswordDialog(
+                request = req,
+                onConfirm = { pwd ->
+                    passwordRequest = null
+                    launchLoad { loadArchive(req.file, req.resume, req.recordRecent, pwd) }
+                },
+                onDismiss = { passwordRequest = null },
+            )
+        }
     }
     }
 }
@@ -431,9 +597,16 @@ private fun HelpDialog(onDismiss: () -> Unit) {
         StringsKey.HelpFullscreen to StringsKey.HelpFullscreenDesc,
         StringsKey.HelpHelp to StringsKey.HelpHelpDesc,
         StringsKey.HelpPrevNext to StringsKey.HelpPrevNextDesc,
+        StringsKey.HelpPage to StringsKey.HelpPageDesc,
+        StringsKey.HelpHomeEnd to StringsKey.HelpHomeEndDesc,
+        StringsKey.HelpZoom to StringsKey.HelpZoomDesc,
+        StringsKey.HelpThumbZoom to StringsKey.HelpThumbZoomDesc,
         StringsKey.HelpClose to StringsKey.HelpCloseDesc,
         StringsKey.HelpDelete to StringsKey.HelpDeleteDesc,
         StringsKey.HelpInfo to StringsKey.HelpInfoDesc,
+        StringsKey.HelpRotate to StringsKey.HelpRotateDesc,
+        StringsKey.HelpFlip to StringsKey.HelpFlipDesc,
+        StringsKey.HelpCopy to StringsKey.HelpCopyDesc,
         StringsKey.HelpSlideshow to StringsKey.HelpSlideshowDesc,
     )
     AlertDialog(
@@ -453,5 +626,45 @@ private fun HelpDialog(onDismiss: () -> Unit) {
             }
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text(strings.t(StringsKey.Close)) } },
+    )
+}
+
+@Composable
+private fun PasswordDialog(request: PasswordRequest, onConfirm: (CharArray) -> Unit, onDismiss: () -> Unit) {
+    val strings = LocalStrings.current
+    var text by remember { mutableStateOf("") }
+    val focus = remember { FocusRequester() }
+    LaunchedEffect(Unit) { focus.requestFocus() }
+    fun confirm() {
+        if (text.isNotEmpty()) onConfirm(text.toCharArray())
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(strings.t(StringsKey.PasswordTitle)) },
+        text = {
+            Column {
+                Text(
+                    strings.t(if (request.wrongPassword) StringsKey.PasswordWrong else StringsKey.PasswordPrompt, request.file.name),
+                    fontSize = GalleryTokens.textBody,
+                )
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { text = it },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardActions = KeyboardActions(onDone = { confirm() }),
+                    modifier = Modifier.fillMaxWidth().padding(top = GalleryTokens.spacingS).focusRequester(focus)
+                        .onPreviewKeyEvent { e ->
+                            if (e.type == KeyEventType.KeyDown && (e.key == Key.Enter || e.key == Key.NumPadEnter)) {
+                                confirm(); true
+                            } else {
+                                false
+                            }
+                        },
+                )
+            }
+        },
+        confirmButton = { TextButton(onClick = { confirm() }) { Text(strings.t(StringsKey.OK)) } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(strings.t(StringsKey.Cancel)) } },
     )
 }

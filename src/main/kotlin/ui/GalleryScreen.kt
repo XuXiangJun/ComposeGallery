@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -46,15 +47,21 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.isCtrlPressed
+import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -62,15 +69,19 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import gallery.AppLocale
 import gallery.ImageItem
 import gallery.RecentEntry
 import gallery.SortDirection
 import gallery.SortMode
+import gallery.THUMB_SIZE_MAX
+import gallery.THUMB_SIZE_MIN
 import gallery.ThemeMode
 import gallery.i18n.LocalStrings
 import gallery.i18n.StringsKey
 import kotlin.math.roundToInt
 
+@OptIn(ExperimentalComposeUiApi::class)
 @Composable
 fun GalleryScreen(
     folderName: String?,
@@ -83,6 +94,7 @@ fun GalleryScreen(
     onSearchChange: (String) -> Unit,
     thumbSize: Float,
     onThumbSizeChange: (Float) -> Unit,
+    onThumbSizeChangeFinished: () -> Unit,
     recursive: Boolean,
     onRecursiveChange: (Boolean) -> Unit,
     loading: Boolean,
@@ -97,16 +109,29 @@ fun GalleryScreen(
     themeMode: ThemeMode,
     onSetTheme: (ThemeMode) -> Unit,
     onHelp: () -> Unit,
-    onLocaleChange: (String) -> Unit,
+    locale: AppLocale,
+    onLocaleChange: (AppLocale) -> Unit,
     recent: List<RecentEntry>,
     onOpenRecent: (RecentEntry) -> Unit,
-    selectedItem: ImageItem? = null,
+    onRemoveRecent: (RecentEntry) -> Unit,
+    onClearRecent: () -> Unit,
+    gridState: LazyGridState,
+    /** 刚在查看器里看过的图：高亮，并在它不在可视范围内时滚动过去。 */
+    lastViewed: ImageItem? = null,
 ) {
     val s = LocalStrings.current
     val query = searchQuery.trim()
     // 与 AppState.step 共用同一套过滤规则（trim + 忽略大小写），保证网格显示顺序与查看器翻页顺序一致。
     // 按 (images, query) 缓存过滤结果：避免每次重组都重算一遍全量过滤（上万条时很明显）。
     val visible = remember(images, query) { gallery.filterImages(images, query) }
+
+    LaunchedEffect(lastViewed) {
+        val target = lastViewed ?: return@LaunchedEffect
+        val idx = visible.indexOf(target)
+        if (idx < 0) return@LaunchedEffect
+        val shown = gridState.layoutInfo.visibleItemsInfo.map { it.index }
+        if (idx !in shown) gridState.scrollToItem(idx)
+    }
 
     Column(
         Modifier
@@ -126,6 +151,7 @@ fun GalleryScreen(
             onSearchChange = onSearchChange,
             thumbSize = thumbSize,
             onThumbSizeChange = onThumbSizeChange,
+            onThumbSizeChangeFinished = onThumbSizeChangeFinished,
             recursive = recursive,
             onRecursiveChange = onRecursiveChange,
             onOpenFolder = onOpenFolder,
@@ -138,6 +164,7 @@ fun GalleryScreen(
             themeMode = themeMode,
             onSetTheme = onSetTheme,
             onHelp = onHelp,
+            locale = locale,
             onLocaleChange = onLocaleChange,
         )
         if (loading) {
@@ -150,7 +177,10 @@ fun GalleryScreen(
                 query = query,
                 recent = recent,
                 onOpenRecent = onOpenRecent,
+                onRemoveRecent = onRemoveRecent,
+                onClearRecent = onClearRecent,
                 onOpenFolder = onOpenFolder,
+                onOpenArchive = onOpenArchive,
             )
         } else if (visible.isNotEmpty()) {
             LazyVerticalGrid(
@@ -158,14 +188,26 @@ fun GalleryScreen(
                 contentPadding = PaddingValues(GalleryTokens.spacingM),
                 horizontalArrangement = Arrangement.spacedBy(GalleryTokens.spacingS),
                 verticalArrangement = Arrangement.spacedBy(GalleryTokens.spacingS),
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier
+                    .fillMaxSize()
+                    // Ctrl + 滚轮调缩略图大小。在 Initial 阶段拦截并消费掉，网格本身就不会跟着滚动。
+                    .onPointerEvent(PointerEventType.Scroll, PointerEventPass.Initial) { event ->
+                        if (!event.keyboardModifiers.isCtrlPressed) return@onPointerEvent
+                        val dy = event.changes.first().scrollDelta.y
+                        if (dy != 0f) {
+                            onThumbSizeChange((thumbSize - dy * 16f).coerceIn(THUMB_SIZE_MIN, THUMB_SIZE_MAX))
+                            onThumbSizeChangeFinished()
+                        }
+                        event.changes.forEach { it.consume() }
+                    },
+                state = gridState,
             ) {
                 items(visible, key = { it.source.cacheKey }) { item ->
                     ThumbnailCell(
                         item = item,
                         thumbSize = thumbSize,
                         onClick = { onImageClick(item) },
-                        isSelected = item == selectedItem,
+                        isSelected = item == lastViewed,
                     )
                 }
             }
@@ -194,6 +236,7 @@ private fun Toolbar(
     onSearchChange: (String) -> Unit,
     thumbSize: Float,
     onThumbSizeChange: (Float) -> Unit,
+    onThumbSizeChangeFinished: () -> Unit,
     recursive: Boolean,
     onRecursiveChange: (Boolean) -> Unit,
     onOpenFolder: () -> Unit,
@@ -206,7 +249,8 @@ private fun Toolbar(
     themeMode: ThemeMode,
     onSetTheme: (ThemeMode) -> Unit,
     onHelp: () -> Unit,
-    onLocaleChange: (String) -> Unit,
+    locale: AppLocale,
+    onLocaleChange: (AppLocale) -> Unit,
 ) {
     val s = LocalStrings.current
     val colors = LocalGalleryColors.current
@@ -231,6 +275,18 @@ private fun Toolbar(
                     Icon(Icons.Filled.PlayArrow, null, modifier = Modifier.size(18.dp))
                     Text(s.t(StringsKey.Slideshow))
                 }
+            }
+            if (total > 0) {
+                // 拖动时实时改网格列宽；松手才回调持久化（避免每挪一格写一次 settings.json）。
+                Slider(
+                    value = thumbSize,
+                    onValueChange = onThumbSizeChange,
+                    onValueChangeFinished = onThumbSizeChangeFinished,
+                    valueRange = THUMB_SIZE_MIN..THUMB_SIZE_MAX,
+                    modifier = Modifier
+                        .width(110.dp)
+                        .semantics { contentDescription = s.t(StringsKey.ThumbSize) },
+                )
             }
             Spacer(Modifier.weight(1f))
             Text(
@@ -416,12 +472,18 @@ private fun Toolbar(
                         expanded = localeExpanded,
                         onDismissRequest = { localeExpanded = false },
                     ) {
-                        listOf("zh" to s.t(StringsKey.LocaleZH), "en" to s.t(StringsKey.LocaleEN)).forEach { (tag, label) ->
+                        listOf(
+                            AppLocale.SYSTEM to s.t(StringsKey.LocaleSystem),
+                            AppLocale.ZH to s.t(StringsKey.LocaleZH),
+                            AppLocale.EN to s.t(StringsKey.LocaleEN),
+                        ).forEach { (value, label) ->
                             DropdownMenuItem(onClick = {
-                                onLocaleChange(tag)
+                                onLocaleChange(value)
                                 localeExpanded = false
                                 moreExpanded = false
                             }) {
+                                CheckMark(checked = locale == value)
+                                Spacer(Modifier.width(GalleryTokens.spacingS))
                                 Text(label)
                             }
                         }
@@ -433,7 +495,7 @@ private fun Toolbar(
 }
 
 @Composable
-private fun SearchField(
+internal fun SearchField(
     value: String,
     onValueChange: (String) -> Unit,
     modifier: Modifier = Modifier,
@@ -494,7 +556,10 @@ private fun EmptyState(
     query: String,
     recent: List<RecentEntry>,
     onOpenRecent: (RecentEntry) -> Unit,
+    onRemoveRecent: (RecentEntry) -> Unit,
+    onClearRecent: () -> Unit,
     onOpenFolder: () -> Unit,
+    onOpenArchive: () -> Unit,
 ) {
     val s = LocalStrings.current
     val colors = LocalGalleryColors.current
@@ -509,13 +574,18 @@ private fun EmptyState(
                 color = colors.onSurfaceVariant,
                 fontSize = 16.sp,
             )
-            TextButton(onClick = onOpenFolder) {
-                Text(s.t(StringsKey.SelectFolder))
+            Row {
+                TextButton(onClick = onOpenFolder) { Text(s.t(StringsKey.SelectFolder)) }
+                TextButton(onClick = onOpenArchive) { Text(s.t(StringsKey.OpenArchive)) }
             }
             if (!searching && folderName == null && recent.isNotEmpty()) {
                 Spacer(Modifier.height(GalleryTokens.spacingXl))
-                Text(s.t(StringsKey.Recent), color = colors.onSurfaceMuted, fontSize = GalleryTokens.textSmall)
-                Spacer(Modifier.height(GalleryTokens.spacingS))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(s.t(StringsKey.Recent), color = colors.onSurfaceMuted, fontSize = GalleryTokens.textSmall)
+                    TextButton(onClick = onClearRecent) {
+                        Text(s.t(StringsKey.ClearRecent), fontSize = GalleryTokens.textSmall)
+                    }
+                }
                 // 显示全部：AppState 已把「最近打开」限制在 8 条以内，这里再截断只会让两处不一致。
                 recent.forEach { entry ->
                     Row(
@@ -526,8 +596,20 @@ private fun EmptyState(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(GalleryTokens.spacingS),
                     ) {
-                        Icon(Icons.Filled.Star, null, tint = colors.primary, modifier = Modifier.size(14.dp))
+                        Text(
+                            s.t(if (entry.type == "archive") StringsKey.RecentArchive else StringsKey.RecentFolder),
+                            color = colors.primary,
+                            fontSize = GalleryTokens.textCaption,
+                        )
                         Text(entry.name, color = colors.onSurface, fontSize = GalleryTokens.textBody)
+                        IconButton(onClick = { onRemoveRecent(entry) }, modifier = Modifier.size(20.dp)) {
+                            Icon(
+                                Icons.Filled.Close,
+                                s.t(StringsKey.RemoveRecent),
+                                tint = colors.onSurfaceMuted,
+                                modifier = Modifier.size(14.dp),
+                            )
+                        }
                     }
                 }
             }
@@ -591,5 +673,15 @@ private fun ThumbnailCell(
             fontSize = GalleryTokens.textSmall,
             color = colors.onSurfaceVariant,
         )
+    }
+}
+
+/** 菜单项前的勾选标记；未选中时占同样宽度，保证文字对齐。 */
+@Composable
+private fun CheckMark(checked: Boolean) {
+    if (checked) {
+        Icon(Icons.Filled.Check, null, tint = LocalGalleryColors.current.primary, modifier = Modifier.size(18.dp))
+    } else {
+        Spacer(Modifier.size(18.dp))
     }
 }

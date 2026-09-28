@@ -25,26 +25,29 @@ import androidx.compose.material.IconButton
 import androidx.compose.material.LinearProgressIndicator
 import androidx.compose.material.Surface
 import androidx.compose.material.Text
+import androidx.compose.material.TextButton
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import gallery.ArchiveReader
-import gallery.ArchiveSource
+import gallery.ArchiveCoverSource
 import gallery.BookEntry
 import gallery.FileSource
 import gallery.ImageSource
+import gallery.NaturalOrder
 import gallery.i18n.LocalStrings
 import gallery.i18n.StringsKey
 import java.io.File
@@ -59,24 +62,14 @@ fun BookshelfScreen(
 ) {
     val colors = LocalGalleryColors.current
     val s = LocalStrings.current
-
-    // 压缩包 reader 共享缓存：本次进入书架期间复用，离开书架时统一关闭。
-    val readerCache = remember {
-        object : LinkedHashMap<String, ArchiveReader>(8, 0.75f, true) {
-            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, ArchiveReader>?): Boolean =
-                size > 8
-        }
+    var query by remember { mutableStateOf("") }
+    var sortByName by remember { mutableStateOf(false) }
+    val shown = remember(books, query, sortByName) {
+        val q = query.trim()
+        val filtered = if (q.isEmpty()) books else books.filter { it.name.contains(q, ignoreCase = true) }
+        if (sortByName) filtered.sortedWith(compareBy(NaturalOrder) { it.name })
+        else filtered.sortedByDescending { it.lastRead }
     }
-    DisposableEffect(readerCache) {
-        onDispose {
-            readerCache.values.forEach { runCatching { it.close() } }
-            readerCache.clear()
-        }
-    }
-    fun getReader(path: String): ArchiveReader? =
-        readerCache[path] ?: runCatching { ArchiveReader.open(File(path)) }
-            .getOrNull()
-            ?.also { readerCache[path] = it }
 
     Column(
         Modifier
@@ -92,6 +85,14 @@ fun BookshelfScreen(
                     Icon(Icons.AutoMirrored.Filled.ArrowBack, s.t(StringsKey.Back), tint = colors.onSurfaceVariant)
                 }
                 Text(s.t(StringsKey.BookshelfTitle), color = colors.onSurface, fontSize = GalleryTokens.textHeadline)
+                Spacer(Modifier.width(GalleryTokens.spacingL))
+                if (books.isNotEmpty()) {
+                    SearchField(query, { query = it }, modifier = Modifier.width(220.dp))
+                    Spacer(Modifier.width(GalleryTokens.spacingS))
+                    TextButton(onClick = { sortByName = !sortByName }) {
+                        Text(s.t(if (sortByName) StringsKey.BookshelfSortName else StringsKey.BookshelfSortRecent))
+                    }
+                }
                 Spacer(Modifier.weight(1f))
                 Text(
                     s.t(StringsKey.BookshelfTotal, books.size),
@@ -118,10 +119,9 @@ fun BookshelfScreen(
                 verticalArrangement = Arrangement.spacedBy(GalleryTokens.spacingM),
                 modifier = Modifier.fillMaxSize(),
             ) {
-                items(books.sortedByDescending { it.lastRead }, key = { it.id }) { book ->
+                items(shown, key = { it.id }) { book ->
                     BookCard(
                         book = book,
-                        getReader = { getReader(it) },
                         onOpen = { onOpen(book) },
                         onRemove = { onRemove(book) },
                     )
@@ -134,7 +134,6 @@ fun BookshelfScreen(
 @Composable
 private fun BookCard(
     book: BookEntry,
-    getReader: (String) -> ArchiveReader?,
     onOpen: () -> Unit,
     onRemove: () -> Unit,
 ) {
@@ -155,8 +154,24 @@ private fun BookCard(
             )
             .clickable(interactionSource = interaction, indication = null, onClick = onOpen),
     ) {
-        Box(Modifier.fillMaxWidth().aspectRatio(1f)) {
-            BookCover(book, targetPx, getReader)
+        // 路径已经不存在（移动 / 删除 / 移动硬盘没插）：封面变灰并标出来，而不是点进去才报错。
+        // remember 住，只在条目变化时 stat 一次，不在每次重组时碰文件系统。
+        val missing = remember(book.path) { !File(book.path).exists() }
+        val finished = book.total > 0 && book.progress + 1 >= book.total
+        Box(Modifier.fillMaxWidth().aspectRatio(1f).alpha(if (missing) 0.4f else 1f)) {
+            BookCover(book, targetPx)
+            if (missing || finished) {
+                Text(
+                    s.t(if (missing) StringsKey.BookMissing else StringsKey.BookFinished),
+                    color = Color.White,
+                    fontSize = GalleryTokens.textCaption,
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .padding(GalleryTokens.spacingXs)
+                        .background(if (missing) colors.danger else colors.primary, GalleryTokens.shapeS)
+                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                )
+            }
             // 删除按钮（右上角）
             IconButton(
                 onClick = onRemove,
@@ -194,19 +209,12 @@ private fun BookCard(
 }
 
 @Composable
-private fun BookCover(book: BookEntry, targetPx: Int, getReader: (String) -> ArchiveReader?) {
-    val source: ImageSource? = when (book.type) {
-        "archive" -> {
-            val archiveFile = File(book.path)
-            val entryName = book.cover.substringAfter("!/", "")
-            val reader = getReader(book.path)
-            if (reader != null) ArchiveSource(archiveFile, entryName, reader, 0, 0) else null
+private fun BookCover(book: BookEntry, targetPx: Int) {
+    val source: ImageSource = remember(book.type, book.path, book.cover) {
+        when (book.type) {
+            "archive" -> ArchiveCoverSource(File(book.path), book.cover.substringAfter("!/", ""))
+            else -> FileSource(File(book.cover))
         }
-        else -> FileSource(File(book.cover))
     }
-    if (source != null) {
-        Thumbnail(source, book.name, targetPx, Modifier.fillMaxSize())
-    } else {
-        Box(Modifier.fillMaxSize().background(LocalGalleryColors.current.placeholder))
-    }
+    Thumbnail(source, book.name, targetPx, Modifier.fillMaxSize())
 }

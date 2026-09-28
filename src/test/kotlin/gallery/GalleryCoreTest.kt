@@ -206,6 +206,30 @@ class GalleryCoreTest {
         assertEquals(afterFirst.lastRead, afterSecond.lastRead, "内容没变时不应刷新 lastRead（即没有重复写盘）")
     }
 
+    /** 换了排序方向后，恢复进度应当回到同一张图，而不是同一个下标。 */
+    @Test
+    fun resumeFollowsImageAcrossSortChanges() {
+        val f = File(tmpDir, "D").apply { mkdirs() }
+        repeat(5) { File(f, "d$it.jpg").writeBytes(byteArrayOf(0)) }
+        val asc = f.listFiles()!!.sortedBy { it.name }.map(::itemFromFile)
+
+        val state = AppState()
+        state.books = listOf(
+            BookEntry(f.absolutePath, "D", "folder", f.absolutePath, asc.first().file!!.absolutePath, 0, 5, 1L)
+        )
+        state.folder = f
+        state.images = asc
+        state.selectedIndex = 1 // d1.jpg
+        state.saveCurrentProgress()
+
+        val desc = asc.reversed()
+        val idx = AppState().resumeIndexFor(f.absolutePath, desc)
+        assertEquals("d1.jpg", desc[idx].name)
+        // 旧数据没有 progressKey：退回下标
+        state.books = listOf(state.books.single().copy(progressKey = null))
+        assertEquals(1, state.resumeIndexFor(f.absolutePath, desc))
+    }
+
     // ---------- 持久化：损坏文件容错 + 原子写不留残留 ----------
 
     @Test
@@ -232,6 +256,25 @@ class GalleryCoreTest {
 
         assertTrue(BookshelfStore.load().isEmpty(), "书架文件损坏时应退化成空书架而不是抛异常")
         assertEquals(Settings(), SettingsStore.load(), "设置文件损坏时应退回默认值")
+    }
+
+    @Test
+    fun corruptStoreIsBackedUpAndNullFieldsAreSanitized() {
+        BookshelfStore.dir.listFiles { f -> f.name.contains(".corrupt-") }?.forEach { it.delete() }
+        BookshelfStore.file.writeText("{ broken")
+        BookshelfStore.load()
+        val backups = BookshelfStore.dir.listFiles { f -> f.name.startsWith("bookshelf.json.corrupt-") }.orEmpty()
+        assertTrue(backups.isNotEmpty(), "损坏的书架文件应被改名备份，而不是等着被下一次 save 覆盖")
+
+        // 缺字段 / 非法枚举：Gson 会填 null，加载后必须已被兜底
+        SettingsStore.file.writeText("""{"themeMode":"PURPLE","sortDirection":null,"recent":[null,{"path":"p"}]}""")
+        val s = SettingsStore.load()
+        assertEquals(ThemeMode.SYSTEM, s.themeMode)
+        assertEquals(SortDirection.ASC, s.sortDirection)
+        assertTrue(s.recent.isEmpty())
+
+        BookshelfStore.file.writeText("""[{"id":"x","name":"n","type":"folder","path":"x","cover":"c","progress":1,"total":2,"lastRead":3},{"id":"y"}]""")
+        assertEquals(listOf("x"), BookshelfStore.load().map { it.id })
     }
 
     @Test
