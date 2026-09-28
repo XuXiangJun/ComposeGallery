@@ -2,11 +2,13 @@ package gallery
 
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.toComposeImageBitmap
+import java.awt.AlphaComposite
 import java.awt.RenderingHints
 import java.awt.image.BufferedImage
 import java.io.ByteArrayInputStream
 import javax.imageio.ImageIO
 import javax.imageio.ImageReader
+import javax.imageio.metadata.IIOMetadata
 import javax.imageio.stream.ImageInputStream
 import kotlin.math.sqrt
 import org.jetbrains.skia.ColorAlphaType
@@ -37,37 +39,121 @@ object GifDecoder {
     fun decode(bytes: ByteArray, maxDim: Int): GifAnimation? {
         return runCatching {
             ByteArrayInputStream(bytes).use { bis ->
-                val imageInputStream: ImageInputStream? = ImageIO.createImageInputStream(bis)
+                val imageInputStream: ImageInputStream = ImageIO.createImageInputStream(bis)
+                    ?: return@use null
                 val reader = ImageIO.getImageReadersByFormatName("gif").next()
-                if (imageInputStream != null) reader.input = imageInputStream
-
-                val loopCount = readLoopCount(reader)
-                val width = reader.getWidth(0)
-                val height = reader.getHeight(0)
-                val numFrames = reader.getNumImages(true)
-
-                // 单帧尺寸同时受 maxDim 与「总像素预算 / 帧数」两个约束。
-                val limitScale = minOf(1f, maxDim.toFloat() / maxOf(width, height).toFloat())
-                val perFrameBudget = MAX_TOTAL_PIXELS.toDouble() / numFrames.coerceAtLeast(1)
-                val budgetScale = sqrt(perFrameBudget / (width.toDouble() * height.toDouble())).toFloat()
-                val scale = minOf(limitScale, budgetScale).coerceIn(0.01f, 1f)
-                val frameW = maxOf(1, (width * scale).toInt())
-                val frameH = maxOf(1, (height * scale).toInt())
-
-                val frames = ArrayList<ImageBitmap>(numFrames)
-                val delays = ArrayList<Int>(numFrames)
-                for (i in 0 until numFrames) {
-                    val image = reader.read(i)
-                    frames.add(bufferedImageToImageBitmap(image, frameW, frameH))
-                    delays.add(getDelay(reader.getImageMetadata(i)))
+                try {
+                    reader.input = imageInputStream
+                    decodeFrames(reader, maxDim)
+                } finally {
+                    reader.dispose()
+                    imageInputStream.close()
                 }
-
-                reader.dispose()
-                imageInputStream?.close()
-
-                GifAnimation(frames, delays, loopCount, width, height)
             }
         }.getOrNull()
+    }
+
+    /**
+     * 逐帧解码并**合成**到逻辑画布上。
+     *
+     * ImageIO 的 `reader.read(i)` 只返回这一帧自己的矩形（Image Descriptor 里的
+     * imageWidth × imageHeight），既不带 left/top 偏移，也不管上一帧的 disposal。
+     * 网上大多数 GIF 都是差分帧（后续帧只更新变化的那一小块），直接把局部帧拉伸到
+     * 整张画布就会花屏 / 跳动。所以这里维护一张全尺寸画布，按 GIF89a 规则合成：
+     * - none / doNotDispose：下一帧直接画在当前画布上；
+     * - restoreToBackgroundColor：下一帧开始前把本帧矩形清成透明；
+     * - restoreToPrevious：下一帧开始前把画布恢复成画本帧之前的样子。
+     */
+    private fun decodeFrames(reader: ImageReader, maxDim: Int): GifAnimation {
+        val loopCount = readLoopCount(reader)
+        val (width, height) = readLogicalScreenSize(reader) ?: (reader.getWidth(0) to reader.getHeight(0))
+        val numFrames = reader.getNumImages(true)
+
+        // 单帧尺寸同时受 maxDim 与「总像素预算 / 帧数」两个约束。
+        val limitScale = minOf(1f, maxDim.toFloat() / maxOf(width, height).toFloat())
+        val perFrameBudget = MAX_TOTAL_PIXELS.toDouble() / numFrames.coerceAtLeast(1)
+        val budgetScale = sqrt(perFrameBudget / (width.toDouble() * height.toDouble())).toFloat()
+        val scale = minOf(limitScale, budgetScale).coerceIn(0.01f, 1f)
+        val frameW = maxOf(1, (width * scale).toInt())
+        val frameH = maxOf(1, (height * scale).toInt())
+
+        val canvas = BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB)
+        val g = canvas.createGraphics()
+        val frames = ArrayList<ImageBitmap>(numFrames)
+        val delays = ArrayList<Int>(numFrames)
+        try {
+            for (i in 0 until numFrames) {
+                val meta = reader.getImageMetadata(i)
+                val info = readFrameInfo(meta)
+                val image = reader.read(i)
+
+                // restoreToPrevious 需要画本帧**之前**的画布快照。
+                val previous = if (info.disposal == "restoreToPrevious") copyOf(canvas) else null
+
+                g.composite = AlphaComposite.SrcOver
+                g.drawImage(image, info.left, info.top, null)
+                frames.add(bufferedImageToImageBitmap(canvas, frameW, frameH))
+                delays.add(info.delayMs)
+
+                // 本帧的 disposal 作用于下一帧开始之前。
+                when (info.disposal) {
+                    "restoreToBackgroundColor" -> {
+                        g.composite = AlphaComposite.Clear
+                        g.fillRect(info.left, info.top, image.width, image.height)
+                    }
+                    "restoreToPrevious" -> if (previous != null) {
+                        g.composite = AlphaComposite.Src
+                        g.drawImage(previous, 0, 0, null)
+                    }
+                }
+            }
+        } finally {
+            g.dispose()
+        }
+        return GifAnimation(frames, delays, loopCount, width, height)
+    }
+
+    private data class FrameInfo(val left: Int, val top: Int, val disposal: String, val delayMs: Int)
+
+    private fun readFrameInfo(meta: IIOMetadata): FrameInfo {
+        var left = 0
+        var top = 0
+        var disposal = "none"
+        var delayMs = 100
+        try {
+            val tree = meta.getAsTree(meta.nativeMetadataFormatName) as Element
+            (tree.getElementsByTagName("ImageDescriptor").item(0) as? Element)?.let {
+                left = it.getAttribute("imageLeftPosition").toIntOrNull() ?: 0
+                top = it.getAttribute("imageTopPosition").toIntOrNull() ?: 0
+            }
+            (tree.getElementsByTagName("GraphicControlExtension").item(0) as? Element)?.let {
+                disposal = it.getAttribute("disposalMethod").ifEmpty { "none" }
+                val delay = it.getAttribute("delayTime").toIntOrNull() ?: 10
+                delayMs = (delay * 10).coerceAtLeast(20)
+            }
+        } catch (_: Exception) {
+        }
+        return FrameInfo(left, top, disposal, delayMs)
+    }
+
+    /** GIF 的逻辑画布尺寸（Logical Screen Descriptor）；读不到时返回 null，调用方退回首帧尺寸。 */
+    private fun readLogicalScreenSize(reader: ImageReader): Pair<Int, Int>? = try {
+        val meta = reader.streamMetadata
+        val tree = meta?.getAsTree(meta.nativeMetadataFormatName) as? Element
+        val lsd = tree?.getElementsByTagName("LogicalScreenDescriptor")?.item(0) as? Element
+        val w = lsd?.getAttribute("logicalScreenWidth")?.toIntOrNull() ?: 0
+        val h = lsd?.getAttribute("logicalScreenHeight")?.toIntOrNull() ?: 0
+        if (w > 0 && h > 0) w to h else null
+    } catch (_: Exception) {
+        null
+    }
+
+    private fun copyOf(img: BufferedImage): BufferedImage {
+        val copy = BufferedImage(img.width, img.height, BufferedImage.TYPE_INT_ARGB)
+        val g = copy.createGraphics()
+        g.drawImage(img, 0, 0, null)
+        g.dispose()
+        return copy
     }
 
     /** 读取 GIF 的 NETSCAPE 扩展循环次数（无则 0 = 无限）。 */
@@ -120,18 +206,5 @@ object GifDecoder {
     private fun emptyBitmap(w: Int, h: Int): ImageBitmap {
         val info = ImageInfo(w, h, ColorType.RGBA_8888, ColorAlphaType.UNPREMUL)
         return Image.makeRaster(info, ByteArray(w * h * 4), info.minRowBytes).toComposeImageBitmap()
-    }
-
-    private fun getDelay(meta: javax.imageio.metadata.IIOMetadata): Int = try {
-        val tree = meta.getAsTree(meta.nativeMetadataFormatName) as Element
-        val nodes = tree.getElementsByTagName("GraphicControlExtension")
-        if (nodes.length > 0) {
-            val delay = (nodes.item(0) as Element).getAttribute("delayTime").toIntOrNull() ?: 10
-            (delay * 10).coerceAtLeast(20)
-        } else {
-            100
-        }
-    } catch (_: Exception) {
-        100
     }
 }

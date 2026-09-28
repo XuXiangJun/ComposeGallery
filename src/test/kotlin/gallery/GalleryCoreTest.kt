@@ -522,6 +522,27 @@ class GalleryCoreTest {
         assertEquals(0, anim.loopCount)
     }
 
+    /**
+     * 差分帧 GIF：第 2 帧只有右下角 10×10 的一小块（偏移 30,30）。
+     * 解码器必须把它合成到画布上，而不是把局部帧拉伸成整张图。
+     */
+    @Test
+    fun animatedGifComposesPartialFrames() {
+        val gifFile = File(tmpDir, "diff.gif")
+        makeDiffGif(gifFile)
+        val anim = GifDecoder.decode(gifFile.readBytes(), maxDim = 40)
+
+        assertNotNull(anim)
+        assertEquals(2, anim.frames.size)
+        assertEquals(40, anim.frames[1].width)
+        // (10,10) 不在差分块里：应仍是第 1 帧的红色，而不是被拉伸的绿色
+        assertPixel(anim.frames[1], 0xFFFF0000.toInt(), "gif diff frame outside patch")
+        val pm = anim.frames[1].toPixelMap()
+        val c = pm.buffer[35 * pm.stride + 35]
+        assertEquals(0xFF, (c shr 8) and 0xFF, "差分块内应为绿色")
+        assertEquals(0x00, (c shr 16) and 0xFF, "差分块内应为绿色")
+    }
+
     // ---------- helpers ----------
 
     private fun writeSolidPng(file: File, w: Int, h: Int, color: Color) {
@@ -579,6 +600,46 @@ class GalleryCoreTest {
         writer.writeToSequence(javax.imageio.IIOImage(frame(0xFFFF0000.toInt()), null, meta()), param)
         writer.writeToSequence(javax.imageio.IIOImage(frame(0xFF00FF00.toInt()), null, meta()), param)
         writer.writeToSequence(javax.imageio.IIOImage(frame(0xFF0000FF.toInt()), null, meta()), param)
+        writer.endWriteSequence()
+        writer.dispose()
+        ios.close()
+    }
+
+    private fun makeDiffGif(file: File) {
+        val writer = ImageIO.getImageWritersByFormatName("gif").next()
+        val ios = ImageIO.createImageOutputStream(file)
+        writer.output = ios
+        val param = writer.defaultWriteParam
+        val type = javax.imageio.ImageTypeSpecifier.createFromBufferedImageType(BufferedImage.TYPE_INT_ARGB)
+
+        fun solid(w: Int, h: Int, color: Int): BufferedImage {
+            val img = BufferedImage(w, h, BufferedImage.TYPE_INT_ARGB)
+            val g2 = img.createGraphics()
+            g2.color = Color(color)
+            g2.fillRect(0, 0, w, h)
+            g2.dispose()
+            return img
+        }
+
+        fun meta(left: Int, top: Int, w: Int, h: Int): javax.imageio.metadata.IIOMetadata {
+            val m = writer.getDefaultImageMetadata(type, param)
+            val root = m.getAsTree(m.nativeMetadataFormatName) as org.w3c.dom.Element
+            val gce = root.getElementsByTagName("GraphicControlExtension").item(0) as org.w3c.dom.Element
+            gce.setAttribute("delayTime", "10")
+            gce.setAttribute("disposalMethod", "doNotDispose")
+            val desc = root.getElementsByTagName("ImageDescriptor").item(0) as org.w3c.dom.Element
+            desc.setAttribute("imageLeftPosition", left.toString())
+            desc.setAttribute("imageTopPosition", top.toString())
+            desc.setAttribute("imageWidth", w.toString())
+            desc.setAttribute("imageHeight", h.toString())
+            m.setFromTree(m.nativeMetadataFormatName, root)
+            return m
+        }
+
+        // 逻辑画布 40×40：写入器按第一帧的尺寸生成 Logical Screen Descriptor
+        writer.prepareWriteSequence(null)
+        writer.writeToSequence(javax.imageio.IIOImage(solid(40, 40, 0xFFFF0000.toInt()), null, meta(0, 0, 40, 40)), param)
+        writer.writeToSequence(javax.imageio.IIOImage(solid(10, 10, 0xFF00FF00.toInt()), null, meta(30, 30, 10, 10)), param)
         writer.endWriteSequence()
         writer.dispose()
         ios.close()
