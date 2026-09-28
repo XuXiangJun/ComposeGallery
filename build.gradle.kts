@@ -1,8 +1,6 @@
 import org.jetbrains.compose.desktop.application.dsl.TargetFormat
 import org.gradle.api.tasks.bundling.Jar
-import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
-import java.util.zip.ZipOutputStream
 
 plugins {
     kotlin("jvm") version "2.4.20"
@@ -35,7 +33,6 @@ val isLinux = !isWindows && !isMac
 repositories {
     mavenCentral()
     google()
-    maven("https://maven.pkg.jetbrains.space/public/p/compose/dev")
 }
 
 dependencies {
@@ -66,9 +63,19 @@ tasks.test {
     useJUnitPlatform()
 }
 
+// 打包统一用 toolchain 指定的 JDK 21，而不是「跑 Gradle 的那个 JDK」：
+// - Compose 的 createRuntimeImage（jlink）默认取 Gradle 所在 JVM。Gradle 跑在 JDK 17 上时，
+//   打出来的 runtime 是 17，而类文件按 21 编译（class version 65）—— 构建全绿，一启动就
+//   UnsupportedClassVersionError。所以下面显式设 javaHome；
+// - packageZip 里的 jpackage 也必须和 runtime image 同版本，否则 jpackage 失败（exit 1）。
+val jdk21Launcher = javaToolchains.launcherFor {
+    languageVersion.set(JavaLanguageVersion.of(21))
+}
+
 compose.desktop {
     application {
         mainClass = "gallery.MainKt"
+        javaHome = jdk21Launcher.get().metadata.installationPath.asFile.absolutePath
 
         nativeDistributions {
             // 分发包格式按平台选择：Windows -> MSI，macOS -> DMG，其余（Linux）-> DEB。
@@ -77,8 +84,12 @@ compose.desktop {
                 isMac -> targetFormats(TargetFormat.Dmg)
                 else -> targetFormats(TargetFormat.Deb)
             }
+            // jlink 只打进 Compose 插件探测到的模块，漏了 jdk.unsupported（sun.misc.Unsafe）。
+            // Gson 反序列化没有无参构造器的 Kotlin 类（BookEntry / RecentEntry）全靠它：缺了它，
+            // 打包版每次启动读书架 / 最近打开都会失败 —— 单元测试跑在完整 JDK 上，发现不了。
+            modules("jdk.unsupported")
             packageName = "ComposeGallery"
-            packageVersion = "1.0.0"
+            packageVersion = version.toString()
             description = "Compose Gallery - image viewer & comic bookshelf"
             vendor = "Compose Gallery"
             windows {
@@ -94,16 +105,12 @@ compose.desktop {
     }
 }
 
-// packageZip 里的 jpackage 取自 toolchain 指定的 JDK 21：Gradle daemon 可能跑在系统其它 JDK
-// （例如 JDK 25）上，而 runtime image 是由 toolchain 21 生成的，JDK 不匹配时 jpackage 会失败（exit 1）。
-val jdk21Launcher = javaToolchains.launcherFor {
-    languageVersion.set(JavaLanguageVersion.of(21))
-}
 
-// 免安装 zip 版：jpackage --type app-image（不需要 WiX），再打包成 zip。
-val packageZip = tasks.register("packageZip") {
+// 免安装 zip 版分两步：先 jpackage --type app-image（不需要 WiX），再由下面的 packageZip
+// （Gradle 自带的 Zip 任务）打成 zip。
+val createPortableAppImage = tasks.register("createPortableAppImage") {
     group = "build"
-    description = "Build a portable zip distribution (jpackage app-image)"
+    description = "Build the jpackage app-image used by packageZip"
     dependsOn("createRuntimeImage", "jar", "unpackDefaultComposeDesktopJvmApplicationResources")
 
     // configuration cache 要求任务执行期不访问 project / configurations / tasks，
@@ -266,31 +273,28 @@ val packageZip = tasks.register("packageZip") {
                 "--- jpackage output (${jpackageLog.absolutePath}) ---\n" +
                 logText.takeLast(4000)
         }
+    }
+}
 
-        // 打包成 zip
-        val appDir = File(destDir, appImageDirName)
-        val zipFile = File(destDir, "ComposeGallery-$appVersion.zip")
-        ZipOutputStream(zipFile.outputStream()).use { zos ->
-            appDir.walkTopDown().forEach { f ->
-                val rel = appDir.toPath().relativize(f.toPath()).toString().replace('\\', '/')
-                if (f.isDirectory) {
-                    zos.putNextEntry(ZipEntry("$rel/"))
-                    zos.closeEntry()
-                } else {
-                    zos.putNextEntry(ZipEntry(rel))
-                    f.inputStream().use { input ->
-                        val buf = ByteArray(8192)
-                        var n = input.read(buf)
-                        while (n > 0) {
-                            zos.write(buf, 0, n)
-                            n = input.read(buf)
-                        }
-                    }
-                    zos.closeEntry()
-                }
-            }
-        }
-        logger.lifecycle("portable zip written to ${zipFile.absolutePath} (${zipFile.length() / 1024 / 1024} MB)")
+// 打 zip 用 Gradle 自带的 Zip 任务，而不是手写 ZipOutputStream：后者不写 Unix 权限位，
+// Linux 上解压出来的 bin/ComposeGallery 是 644，双击 / 命令行都起不来。Zip 任务会把文件
+// 原有的权限（jpackage 生成的 launcher 是 755）记进 zip 条目里。
+val packageZip = tasks.register<Zip>("packageZip") {
+    group = "build"
+    description = "Build a portable zip distribution (jpackage app-image)"
+    dependsOn(createPortableAppImage)
+    val destDir = layout.buildDirectory.dir("compose/binaries/main/app")
+    val appImageDirName = if (isMac) "ComposeGallery.app" else "ComposeGallery"
+    from(destDir.map { it.dir(appImageDirName) })
+    destinationDirectory.set(destDir)
+    archiveFileName.set("ComposeGallery-$version.zip")
+    isPreserveFileTimestamps = true
+    // Gradle 9 起归档任务默认写固定权限（文件一律 644），launcher 的可执行位会丢；
+    // 这里显式改回「沿用文件系统上的权限」。
+    useFileSystemPermissions()
+    doLast {
+        val zip = archiveFile.get().asFile
+        logger.lifecycle("portable zip written to ${zip.absolutePath} (${zip.length() / 1024 / 1024} MB)")
     }
 }
 
@@ -303,6 +307,7 @@ val verifyPackageZip = tasks.register("verifyPackageZip") {
     group = "verification"
     description = "Verify the packageZip app image contains what its launcher needs"
     dependsOn(packageZip)
+    val win0 = isWindows
 
     // 配置期抓成普通值，执行期不碰 project。
     val destDirFile = File(layout.buildDirectory.get().asFile, "compose/binaries/main/app")
@@ -311,13 +316,18 @@ val verifyPackageZip = tasks.register("verifyPackageZip") {
 
     doLast {
         val appImageDir = File(destDirFile, if (mac0) "$appName0.app" else appName0)
-        val appDir = File(appImageDir, "app")
-        check(appDir.isDirectory) { "找不到 app 目录：${appDir.absolutePath}" }
+        // jpackage app-image 的 app 目录位置因平台而异：Windows 是 app/，Linux 是 lib/app/，
+        // macOS 是 Contents/app/。（原先写死 app/，在 Linux 上这一步永远过不了。）
+        val appDir = listOf("app", "lib/app", "Contents/app").map { File(appImageDir, it) }
+            .firstOrNull { it.isDirectory }
+        check(appDir != null) { "找不到 app 目录（app / lib/app / Contents/app）：${appImageDir.absolutePath}" }
 
         // 1) skiko 原生库必须真的躺在 app/ —— java-options 里 -Dskiko.library.path=$APPDIR
         //    指的就是这里，skiko 加载不到就直接 LibraryLoadException。
+        // Windows 上是 skiko-windows-x64.dll，Linux / macOS 上带 lib 前缀（libskiko-linux-x64.so）。
         val natives = appDir.listFiles { f ->
-            f.isFile && f.name.startsWith("skiko-") && !f.name.endsWith(".jar")
+            f.isFile && (f.name.startsWith("skiko-") || f.name.startsWith("libskiko-")) &&
+                !f.name.endsWith(".jar") && !f.name.endsWith(".sha256")
         }?.toList().orEmpty()
         check(natives.isNotEmpty()) {
             "app/ 里没有任何 skiko 原生库（skiko-windows-x64.dll / skiko-linux-x64.so 等），" +
@@ -345,6 +355,30 @@ val verifyPackageZip = tasks.register("verifyPackageZip") {
             "ComposeGallery.cfg 引用了 ${missing.size} 个不存在的 jar，" +
                 "说明拷贝阶段丢了文件（很可能是同基名 jar 互相覆盖）：" +
                 missing.take(5).joinToString { it.name }
+        }
+
+        // 3) 打进去的 runtime 必须是 JDK 21+（类文件按 21 编译），且包含 Gson 需要的 jdk.unsupported。
+        val release = listOf("runtime/release", "lib/runtime/release", "Contents/runtime/Contents/Home/release")
+            .map { File(appImageDir, it) }.firstOrNull { it.isFile }
+        check(release != null) { "找不到 runtime/release：${appImageDir.absolutePath}" }
+        val props = release.readLines().associate { line ->
+            line.substringBefore('=') to line.substringAfter('=', "").trim('"')
+        }
+        val major = props["JAVA_VERSION"].orEmpty().substringBefore('.').toIntOrNull() ?: 0
+        check(major >= 21) {
+            "打包的 runtime 是 Java ${props["JAVA_VERSION"]}，但类文件按 21 编译，启动会 UnsupportedClassVersionError。" +
+                "检查 compose.desktop.application.javaHome。"
+        }
+        check("jdk.unsupported" in props["MODULES"].orEmpty().split(' ')) {
+            "runtime 缺 jdk.unsupported 模块，Gson 读不了书架 / 设置。检查 nativeDistributions.modules。"
+        }
+
+        // 4) 非 Windows 上 launcher 必须可执行（zip 里的权限位取自这里）。
+        if (!win0) {
+            val launcher = File(appImageDir, if (mac0) "Contents/MacOS/$appName0" else "bin/$appName0")
+            check(launcher.isFile && launcher.canExecute()) {
+                "launcher 不存在或没有可执行权限：${launcher.absolutePath}"
+            }
         }
 
         logger.lifecycle("verifyPackageZip: OK（skiko 原生库 ${natives.joinToString { it.name }}；classpath 条目全部存在）")

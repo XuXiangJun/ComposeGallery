@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [master]
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -79,3 +80,32 @@ jobs:
           name: composegallery-zip-${{ matrix.os }}
           path: build/compose/binaries/main/app/*.zip
           if-no-files-found: error
+
+  # 推 v* tag 时把各平台的免安装 zip 挂到 GitHub Release 上。
+  release:
+    name: release
+    runs-on: ubuntu-latest
+    needs: package
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: composegallery-zip-*
+          path: dist
+
+      # 两个平台的 zip 同名（ComposeGallery-<版本>.zip），按平台改名避免互相覆盖。
+      - name: Rename per platform
+        shell: bash
+        run: |
+          for d in dist/composegallery-zip-*; do
+            os="${d##*composegallery-zip-}"
+            for f in "$d"/*.zip; do mv "$f" "dist/$(basename "${f%.zip}")-${os%-latest}.zip"; done
+          done
+          ls -l dist
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip
+          generate_release_notes: true
