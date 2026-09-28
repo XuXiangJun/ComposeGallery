@@ -4,24 +4,35 @@
 
 ## 功能
 
-- 打开文件夹，浏览 JPG / PNG / GIF / BMP / WebP / ICO / JFIF / AVIF 图片
-- 打开压缩包（**zip / 7z**），直接浏览压缩包内的图片（无需解压）
+- 打开文件夹，浏览 JPG / PNG / GIF / BMP / WebP / ICO / JFIF 图片（skiko 没有 AVIF / HEIF 解码器，不列入）
+- 打开压缩包（**zip / cbz / 7z / cb7**），直接浏览压缩包内的图片（无需解压）；加密的 7z 会弹框要密码，
+  加密的 zip 暂不支持（会明确提示）；自动跳过 macOS 的 `__MACOSX/`、`._xxx` 元数据
+- 拖文件夹 / 压缩包 / 图片到窗口即可打开；也可作为命令行参数（「打开方式」/ 文件关联）传入
+- 文件名**自然排序**（`2.jpg` 排在 `10.jpg` 前面）
 - 缩略图网格（自适应列数、可调大小、悬停高亮、加载骨架占位）
 - 可选递归扫描子文件夹
 - 排序：名称 / 修改时间 / 大小，支持升序 / 降序
 - 文件名搜索过滤（工具栏搜索框，实时筛选）
-- 大图查看：鼠标滚轮缩放、拖拽平移、触控板捏合缩放、双击还原；支持动画 GIF 逐帧循环播放
-- 键盘：`←`/`→` 上一张/下一张、`Esc` 关闭、`F11` 全屏、`Delete` 删除（优先移入回收站）、`I` 信息、`空格` 幻灯片、`F1` 快捷键帮助
-- **书架**：收藏文件夹/压缩包为「书」，显示封面、页码与进度，点击从上次进度继续阅读
-- **自动保存进度**：翻页/关闭时自动记录，进度持久化到 `~/.ComposeGallery/bookshelf.json`
+- 大图查看：鼠标滚轮缩放（或切换为滚轮翻页，Ctrl+滚轮始终缩放）、拖拽平移、触控板捏合缩放、双击还原、
+  点击左 / 右三分之一翻页；旋转 / 翻转、复制到剪贴板、用默认程序打开、在文件管理器中选中；
+  支持动画 GIF（按 disposal 规则逐帧合成，差分帧不花屏）
+- **从右往左阅读**（日漫）：←、底栏箭头、点击区域的方向随之对调
+- 全屏时鼠标静止 2.5 秒自动隐藏工具栏和指针
+- 键盘：见下方「操作说明」，`F1` 查看全部快捷键
+- **书架**：收藏文件夹/压缩包为「书」，显示封面、页码与进度（已读完 / 路径失效会标出来），支持搜索与按名称 / 最近阅读排序，
+  点击从上次进度继续阅读；进度按「图片路径 + 下标」记录，换排序或增删文件后仍回到同一张图
+- **自动保存进度**：翻页/关闭窗口时自动记录，进度持久化到 `~/.ComposeGallery/bookshelf.json`；
+  JSON 损坏时先备份为 `*.corrupt-<时间戳>` 再退回默认值
+- 记住排序方式、子文件夹开关、缩略图大小、窗口位置与大小、阅读方向、滚轮模式
 - **主题**：浅色 / 深色 / 跟随系统（工具栏切换），并提供「最近打开」快捷入口
 - **中英文界面**：工具栏「语言」菜单切换，选择结果持久化
 - **幻灯片**：播放间隔可调（大图底部栏滑块）
 - 幻灯片播放、在文件管理器中定位、查看图片信息
-- 本地缩略图内存缓存（Skia 解码 + 双线性缩放）
+- 缩略图内存缓存 + 磁盘缓存（`~/.ComposeGallery/thumbs/`，WebP，上限 256MB）；大图缓存按字节限额
+- 日志：`~/.ComposeGallery/logs/gallery.log`（解码失败、存盘失败等静默降级的情况都会记下来）
 
 > 说明：zip 和 7z 都用 Apache Commons Compress 读取（它比 JDK 自带的 `ZipFile` 宽容，能打开 GBK/Shift-JIS 等中文/日文条目名的压缩包，避免 JDK 的 "invalid CEN header" 报错）；rar 暂不支持（纯 Java 下 RAR5 解压支持不佳）。压缩包内的图片只读，不提供删除。
-> zip 条目名的编码是**探测**出来的：先按 UTF-8 打开，再把条目名的原始字节（`rawName`）做一次严格 UTF-8 解码，失败才改用 GB18030 重开。之所以不看解码后的字符，是因为 commons-compress 把畸形 UTF-8 字节解成 `?`（合法文件名字符，会误判），而且畸形字节还可能恰好拼成合法 UTF-8。
+> zip 条目名的编码是**探测**出来的：先按 UTF-8 打开，再把条目名的原始字节（`rawName`）做一次严格 UTF-8 解码，失败时再判断是不是 Shift-JIS（能严格解码且含全角假名），否则改用 GB18030 重开。之所以不看解码后的字符，是因为 commons-compress 把畸形 UTF-8 字节解成 `?`（合法文件名字符，会误判），而且畸形字节还可能恰好拼成合法 UTF-8。
 
 ## 技术栈
 
@@ -97,8 +108,15 @@ $env:GRADLE_USER_HOME = "D:\gradle-home"; $env:TMP = $env:TEMP = "D:\tmp"; .\gra
 `packageMsi` 用 JDK 自带的 jpackage + jlink + WiX 生成 MSI。首次运行会自动联网下载
 WiX 3（约 34 MB，缓存到 Gradle 用户目录下的 `compose-jb/wix311.zip`）。
 
-`packageZip` 是自定义任务（jpackage `--type app-image` 后再 zip），有两个容易踩的实现细节，
-都已在 `build.gradle.kts` 里注释：
+`packageZip` 分两步：自定义任务 `createPortableAppImage`（jpackage `--type app-image`），再由 Gradle
+自带的 `Zip` 任务打包（`useFileSystemPermissions()`，Linux 上 launcher 的可执行位才不会丢）。
+几个容易踩的实现细节都已在 `build.gradle.kts` 里注释：
+
+- **runtime 必须是 JDK 21**。Compose 的 jlink 默认用「跑 Gradle 的那个 JDK」；Gradle 跑在 JDK 17 上时，
+  打出来的程序一启动就 `UnsupportedClassVersionError`。所以 `compose.desktop.application.javaHome`
+  显式指向 toolchain 的 JDK 21。
+- **runtime 要带 `jdk.unsupported`**。Gson 反序列化 `BookEntry` / `RecentEntry` 依赖 `sun.misc.Unsafe`，
+  缺了它打包版每次启动都读不回书架和最近打开（单元测试跑在完整 JDK 上，发现不了）。
 
 - **skiko 原生库必须显式放进 `app/`**。`.cfg` 里 `app.classpath=$APPDIR\*.jar` 说明 `$APPDIR`
   就是 jar 所在的 `app/` 目录，而 `-Dskiko.library.path=$APPDIR` 会让 skiko 到这里找
@@ -111,13 +129,16 @@ WiX 3（约 34 MB，缓存到 Gradle 用户目录下的 `compose-jb/wix311.zip`�
   按原名拷进同一个目录会互相覆盖，导致 `NoClassDefFoundError`。所以输出名带上 group
   （如 `androidx.compose.runtime_runtime-saveable-desktop_1.12.1.jar`），并在拷贝前校验无重名。
 
-验证过：`packageZip` 产物解压后可直接启动（进程存活、窗口标题 `Compose Gallery`、无异常输出）。
+`verifyPackageZip` 会检查：skiko 原生库在 app 目录里、`.cfg` 引用的 jar 都存在、runtime 版本 ≥ 21
+且含 `jdk.unsupported`、非 Windows 上 launcher 可执行（app 目录位置按平台区分：Windows `app/`、
+Linux `lib/app/`、macOS `Contents/app/`）。
 
 ### CI
 
 仓库带 `.github/workflows/ci.yml`：push / PR 到 `master` 时，在 `ubuntu-latest` 与
 `windows-latest` 上以 Temurin JDK 21 跑 `./gradlew test`，再跑一遍 `./gradlew packageZip`
-（jpackage app-image，不需要 WiX），产物上传为 artifact。macOS 暂未纳入打包矩阵：
+（jpackage app-image，不需要 WiX），产物上传为 artifact；推送 `v*` tag 时额外把各平台 zip
+发布到 GitHub Release。macOS 暂未纳入打包矩阵：
 `.app` 内含符号链接、`packageZip` 的 macOS 路径尚未验证过（见上文 TODO）。
 
 ### 沙箱 / 受限环境构建
@@ -141,11 +162,11 @@ GRADLE_SANDBOX=1 ./gradlew packageMsi # 与 -Psandbox 等效
 
 | 位置 | 操作 |
 | --- | --- |
-| 网格 | 点击缩略图打开大图；工具栏可「打开文件夹」「打开压缩包」「书架」「加入书架」、换排序与升降序、调缩略图大小、切换子文件夹扫描、搜索图片 |
-| 网格 | 未打开任何图集时显示「最近打开」快捷入口；工具栏可切换浅色 / 深色 / 跟随系统主题与界面语言 |
-| 书架 | 点击「书架」进入；显示收藏的图集（封面 + 页码 + 进度），点击从上次进度继续，右上角 × 移出书架 |
-| 查看器 | 滚轮缩放、拖拽平移、双击还原；底部按钮支持适应 / 1:1 / 缩放，并可调幻灯片播放间隔 |
-| 快捷键 | `←`/`→` 上一张/下一张，`Esc` 关闭，`F11` 全屏，`Delete` 删除，`I` 信息，`空格` 幻灯片，`F1` 快捷键帮助，`Ctrl+O` 打开文件夹，`F5` 刷新 |
+| 网格 | 点击缩略图打开大图；工具栏可「打开文件夹」「打开压缩包」「书架」「加入书架」、换排序与升降序、调缩略图大小（滑块或 `Ctrl+滚轮`）、切换子文件夹扫描、搜索图片；关闭大图后回到原来的滚动位置并高亮刚看的那张 |
+| 网格 | 未打开任何图集时显示「最近打开」（可单条移除 / 清空）；工具栏可切换浅色 / 深色 / 跟随系统主题与界面语言（含「跟随系统」） |
+| 书架 | 点击「书架」进入；显示收藏的图集（封面 + 页码 + 进度），可搜索、切换排序，点击从上次进度继续，右上角 × 移出书架 |
+| 查看器 | 滚轮缩放或翻页、拖拽平移、双击还原、点击左右两侧翻页；底部按钮：阅读方向、滚轮模式、适应 / 1:1 / 缩放 / 旋转、定位文件、用默认程序打开、幻灯片间隔、删除 |
+| 快捷键 | `←`/`→`、`PgUp`/`PgDn` 上一张/下一张，`Home`/`End` 首张/末张，`+`/`-`/`0`/`1` 放大/缩小/适应/1:1，`R`/`Shift+R` 旋转，`H` 翻转，`Ctrl+C` 复制，`Esc` 关闭，`F11` 全屏，`Delete` 删除，`I` 信息，`空格` 幻灯片，`F1` 快捷键帮助，`Ctrl+O` 打开文件夹，`F5` 刷新 |
 
 ## 项目结构
 
@@ -166,7 +187,8 @@ gallery/
     ├── main/
     │   ├── resources/icon.ico     # 应用图标（Windows；macOS/Linux 图标待补，见「运行」一节）
     │   └── kotlin/
-    │       ├── Main.kt            # 入口 + 全屏处理 + 窗口图标
+    │       ├── Main.kt            # 入口（命令行路径）+ 全屏 + 窗口图标 / 位置恢复
+    │       ├── AppLog.kt          # 文件日志（~/.ComposeGallery/logs）
     │       ├── AppState.kt        # 应用状态 + 书架/进度/最近打开/主题/搜索
     │       ├── Model.kt           # ImageSource / ImageItem / 排序（含升降序）
     │       ├── Bookshelf.kt       # BookEntry + 书架 JSON 持久化（经 JsonStore 原子写）
@@ -174,8 +196,8 @@ gallery/
     │       ├── JsonStore.kt       # 数据目录 + JSON 读写 + 原子写（临时文件 + ATOMIC_MOVE）
     │       ├── ArchiveReader.kt   # 压缩包读取（zip / 7z，条目名编码探测）
     │       ├── ImageScanner.kt    # 目录 / 归档扫描
-    │       ├── ImageLoader.kt     # Skia 解码 + 缩放 + 缩略图 LRU 缓存
-    │       ├── FileOps.kt         # 打开文件夹/压缩包、回收站、文件管理器
+    │       ├── ImageLoader.kt     # Skia 解码 + 缩放 + 缩略图内存 / 磁盘缓存
+    │       ├── FileOps.kt         # 文件对话框、回收站、文件管理器定位、默认程序打开、剪贴板
     │       ├── gallery/
     │       │   └── GifDecoder.kt  # 动画 GIF 解码（帧 + 延时 + 循环次数）
     │       ├── i18n/
