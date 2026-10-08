@@ -44,6 +44,9 @@ dependencies {
     implementation("org.jetbrains.compose.material:material:1.12.1")
     implementation("org.jetbrains.compose.material:material-icons-core:1.7.3")
     implementation("org.apache.commons:commons-compress:1.28.0")
+    // commons-compress 把 xz 标成 optional，但 7z 解码（SevenZFile → Coders 的静态块）
+    // 无条件引用 org.tukaani.xz：缺了它所有 7z / cb7 一打开就 NoClassDefFoundError。
+    implementation("org.tukaani:xz:1.10")
     implementation("com.google.code.gson:gson:2.14.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-swing:1.11.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")

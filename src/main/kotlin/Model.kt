@@ -99,6 +99,10 @@ fun filterImages(images: List<ImageItem>, query: String): List<ImageItem> {
  * 自然排序比较：数字段按数值比较，其余按字符（忽略大小写）。
  * `2.jpg` < `10.jpg`，`第9话` < `第10话` —— 漫画 / 扫描图的文件名几乎都依赖这一点，
  * 纯字典序会把第 10 页排到第 2 页前面。数值相等时（`01` 与 `1`）退回原始字符串比较，保证全序。
+ *
+ * 数字段只认 ASCII `0-9`：`Char.isDigit()` 是 Unicode Nd（全角 `１`、阿拉伯-印度数字 `٩`…），
+ * 这些字符一边按「数值」、一边按码点和字母比较，两套规则混用会破坏传递性
+ * （`11. < a < ٩b` 却 `٩b < 11.`），排序结果随输入顺序变化。全角数字因此按普通字符排。
  */
 fun naturalCompare(a: String, b: String): Int {
     var i = 0
@@ -106,11 +110,11 @@ fun naturalCompare(a: String, b: String): Int {
     while (i < a.length && j < b.length) {
         val ca = a[i]
         val cb = b[j]
-        if (ca.isDigit() && cb.isDigit()) {
+        if (ca.isAsciiDigit() && cb.isAsciiDigit()) {
             val si = i
             val sj = j
-            while (i < a.length && a[i].isDigit()) i++
-            while (j < b.length && b[j].isDigit()) j++
+            while (i < a.length && a[i].isAsciiDigit()) i++
+            while (j < b.length && b[j].isAsciiDigit()) j++
             // 去掉前导零后先比位数、再逐位比，避免超长数字溢出 Long。
             val na = a.substring(si, i).trimStart('0')
             val nb = b.substring(sj, j).trimStart('0')
@@ -127,6 +131,8 @@ fun naturalCompare(a: String, b: String): Int {
     val rest = (a.length - i) - (b.length - j)
     return if (rest != 0) rest else a.compareTo(b)
 }
+
+private fun Char.isAsciiDigit() = this in '0'..'9'
 
 val NaturalOrder: Comparator<String> = Comparator(::naturalCompare)
 

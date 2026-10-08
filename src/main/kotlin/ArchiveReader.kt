@@ -164,7 +164,7 @@ class ArchiveReader private constructor(
             if (!needsFallback(utf8)) {
                 return ArchiveReader(utf8, null)
             }
-            val charset = if (looksLikeShiftJis(utf8)) Charset.forName("Shift_JIS") else Charset.forName("GB18030")
+            val charset = if (looksLikeShiftJis(utf8)) Charset.forName("windows-31j") else Charset.forName("GB18030")
             utf8.close()
             val fallback = CompressZipFile.builder()
                 .setFile(file)
@@ -180,9 +180,13 @@ class ArchiveReader private constructor(
          * （0xA1–0xDF 是 Shift_JIS 的半角片假名）。但真正的日文文件名几乎总带全角平假名 /
          * 片假名（U+3040–U+30FF），而 GBK 字节按 Shift_JIS 解出来落在半角片假名区
          * （U+FF61–U+FF9F），不会出现全角假名。所以要求：全部严格可解 + 至少出现一个全角假名。
+         *
+         * 探测和回退都用 windows-31j（CP932）而不是严格的 `Shift_JIS`：Windows 上压出来的日文
+         * 压缩包实际是 CP932，`①`、`㈱`、`髙` 这类 NEC / IBM 扩展字严格 Shift_JIS 解不了 ——
+         * 一个这样的字符就会让整包被判成「不是日文」、改按 GB18030 打开，所有条目名乱码。
          */
         private fun looksLikeShiftJis(zip: CompressZipFile): Boolean {
-            val sjis = Charset.forName("Shift_JIS")
+            val sjis = Charset.forName("windows-31j")
             var sawKana = false
             for (e in zip.entries.toList()) {
                 val raw = e.rawName ?: continue

@@ -18,6 +18,7 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
+import org.apache.commons.compress.archivers.sevenz.SevenZOutputFile
 import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
@@ -337,6 +338,55 @@ class GalleryCoreTest {
         }
     }
 
+    /**
+     * CP932（Windows 上的日文编码）的 NEC / IBM 扩展字（①、㈱、髙）严格 Shift_JIS 解不了。
+     * 原先一个这样的字符就让整包被判成「非日文」、按 GB18030 打开而全部乱码。
+     */
+    @Test
+    fun cp932ExtendedCharsInZipEntryNamesAreRecovered() {
+        val zipFile = File(tmpDir, "cp932.zip")
+        val names = listOf("まんが/①だい1わ/001.jpg", "まんが/㈱髙橋/002.jpg")
+        ZipOutputStream(zipFile.outputStream(), Charset.forName("windows-31j")).use { zos ->
+            for (n in names) {
+                zos.putNextEntry(ZipEntry(n))
+                zos.write(byteArrayOf(0))
+                zos.closeEntry()
+            }
+        }
+        ArchiveReader.open(zipFile).use { reader ->
+            assertEquals(names, reader.entries.map { it.name })
+        }
+    }
+
+    /**
+     * 真实的 7z / cb7 往返：SevenZOutputFile 默认 LZMA2 压缩，读取要走 org.tukaani.xz。
+     * 原先运行时缺 xz，所有 7z 一打开就 NoClassDefFoundError —— 正因为没有这个用例才一路绿灯。
+     */
+    @Test
+    fun sevenZAndCb7RoundTrip() = runBlocking {
+        val png = File(tmpDir, "solid.png")
+        writeSolidPng(png, 400, 300, Color.RED)
+        for (ext in listOf("7z", "cb7")) {
+            val archive = File(tmpDir, "book.$ext")
+            SevenZOutputFile(archive).use { out ->
+                for (name in listOf("第1话/10.png", "第1话/2.png")) {
+                    out.putArchiveEntry(out.createArchiveEntry(png, name))
+                    out.write(png.readBytes())
+                    out.closeArchiveEntry()
+                }
+            }
+            assertTrue(ArchiveReader.isSupported(archive))
+            ArchiveReader.open(archive).use { reader ->
+                assertEquals(setOf("第1话/10.png", "第1话/2.png"), reader.entries.map { it.name }.toSet())
+                val items = ImageScanner.scanArchive(archive, reader)
+                assertEquals(listOf("2.png", "10.png"), items.map { it.name }, "$ext 条目应按自然排序")
+                val thumb = ImageLoader.loadThumbnail(items.first().source, 100)
+                assertNotNull(thumb, "$ext 条目应能解码")
+                assertEquals(100, thumb.width)
+            }
+        }
+    }
+
     @Test
     fun cbzIsOpenedAsZip() {
         val cbz = File(tmpDir, "book.cbz")
@@ -598,6 +648,30 @@ class GalleryCoreTest {
         )
         val big = "img99999999999999999999999.jpg"
         assertTrue(naturalCompare("img2.jpg", big) < 0, "超长数字段不能溢出")
+    }
+
+    /**
+     * 比较器必须是全序：Unicode 数字（全角 `１`、阿拉伯-印度 `٩`）曾被当成数字段，
+     * 和按码点比较的字母混用后出现 `11. < a < ٩b < 11.` 这样的环。
+     * 这里在含大小写、符号、全角 / 阿拉伯数字的随机名上穷举三元组校验反对称与传递性。
+     */
+    @Test
+    fun naturalCompareIsATotalOrder() {
+        val alphabet = "0129aAbB._ １٩"
+        val rnd = java.util.Random(42)
+        val names = List(120) {
+            buildString { repeat(1 + rnd.nextInt(4)) { append(alphabet[rnd.nextInt(alphabet.length)]) } }
+        }
+        val sign = { a: String, b: String -> Integer.signum(naturalCompare(a, b)) }
+        for (a in names) for (b in names) {
+            assertEquals(-sign(b, a), sign(a, b), "反对称：$a / $b")
+            if (sign(a, b) >= 0) continue
+            for (c in names) {
+                if (sign(b, c) < 0) assertTrue(sign(a, c) < 0, "传递性：$a < $b < $c")
+            }
+        }
+        // 全角数字按普通字符排：不参与数值比较，也就不会和 ASCII 数字交错成环。
+        assertEquals(listOf("2.jpg", "10.jpg", "１２.jpg"), listOf("１２.jpg", "10.jpg", "2.jpg").sortedWith(NaturalOrder))
     }
 
     @Test
