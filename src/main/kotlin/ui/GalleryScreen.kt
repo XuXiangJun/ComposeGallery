@@ -94,7 +94,6 @@ fun GalleryScreen(
     onSearchChange: (String) -> Unit,
     thumbSize: Float,
     onThumbSizeChange: (Float) -> Unit,
-    onThumbSizeChangeFinished: () -> Unit,
     recursive: Boolean,
     onRecursiveChange: (Boolean) -> Unit,
     loading: Boolean,
@@ -151,7 +150,6 @@ fun GalleryScreen(
             onSearchChange = onSearchChange,
             thumbSize = thumbSize,
             onThumbSizeChange = onThumbSizeChange,
-            onThumbSizeChangeFinished = onThumbSizeChangeFinished,
             recursive = recursive,
             onRecursiveChange = onRecursiveChange,
             onOpenFolder = onOpenFolder,
@@ -196,7 +194,6 @@ fun GalleryScreen(
                         val dy = event.changes.first().scrollDelta.y
                         if (dy != 0f) {
                             onThumbSizeChange((thumbSize - dy * 16f).coerceIn(THUMB_SIZE_MIN, THUMB_SIZE_MAX))
-                            onThumbSizeChangeFinished()
                         }
                         event.changes.forEach { it.consume() }
                     },
@@ -236,7 +233,6 @@ private fun Toolbar(
     onSearchChange: (String) -> Unit,
     thumbSize: Float,
     onThumbSizeChange: (Float) -> Unit,
-    onThumbSizeChangeFinished: () -> Unit,
     recursive: Boolean,
     onRecursiveChange: (Boolean) -> Unit,
     onOpenFolder: () -> Unit,
@@ -277,11 +273,10 @@ private fun Toolbar(
                 }
             }
             if (total > 0) {
-                // 拖动时实时改网格列宽；松手才回调持久化（避免每挪一格写一次 settings.json）。
+                // 拖动时实时改网格列宽；持久化由 App 停顿后合并写盘，这里不管。
                 Slider(
                     value = thumbSize,
                     onValueChange = onThumbSizeChange,
-                    onValueChangeFinished = onThumbSizeChangeFinished,
                     valueRange = THUMB_SIZE_MIN..THUMB_SIZE_MAX,
                     modifier = Modifier
                         .width(110.dp)

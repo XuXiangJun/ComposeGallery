@@ -33,6 +33,13 @@ object GifDecoder {
     private const val MAX_TOTAL_PIXELS = 96L * 1024 * 1024
 
     /**
+     * 合成画布的像素上限（4096²，ARGB 即 64MB；restoreToPrevious 还要再拷一份）。
+     * 画布按 GIF 声明的逻辑尺寸分配，而 GIF 允许声明到 65535² —— 不设上限的话一张小文件
+     * 就能让这里尝试分配十几 GB。超出时在缩小的画布上合成。
+     */
+    private const val MAX_CANVAS_PIXELS = 4096L * 4096
+
+    /**
      * 解码动画 GIF 为帧列表。[maxDim] 限制单帧最大边长（大图按目标尺寸缩小，
      * 避免全尺寸加载过多内存）。帧直接用像素拷贝转成 Skia ImageBitmap（不经 PNG 中转）。
      */
@@ -73,12 +80,20 @@ object GifDecoder {
         val limitScale = minOf(1f, maxDim.toFloat() / maxOf(width, height).toFloat())
         val perFrameBudget = MAX_TOTAL_PIXELS.toDouble() / numFrames.coerceAtLeast(1)
         val budgetScale = sqrt(perFrameBudget / (width.toDouble() * height.toDouble())).toFloat()
-        val scale = minOf(limitScale, budgetScale).coerceIn(0.01f, 1f)
-        val frameW = maxOf(1, (width * scale).toInt())
-        val frameH = maxOf(1, (height * scale).toInt())
+        // 画布通常就是逻辑尺寸（合成按像素精确对齐）；超出 MAX_CANVAS_PIXELS 才缩小。
+        val canvasScale = minOf(1.0, sqrt(MAX_CANVAS_PIXELS.toDouble() / (width.toDouble() * height.toDouble())))
+        val canvasW = maxOf(1, (width * canvasScale).toInt())
+        val canvasH = maxOf(1, (height * canvasScale).toInt())
+        // 输出帧不能比画布大（那只是把缩小过的画布再放大回去）。
+        val scale = minOf(limitScale, budgetScale, canvasScale.toFloat()).coerceIn(0.01f, 1f)
+        val frameW = minOf(canvasW, maxOf(1, (width * scale).toInt()))
+        val frameH = minOf(canvasH, maxOf(1, (height * scale).toInt()))
+        // 帧坐标（逻辑尺寸）→ 画布坐标；canvasScale == 1 时原样返回。
+        fun toCanvas(v: Int) = (v * canvasScale).toInt()
 
-        val canvas = BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB)
+        val canvas = BufferedImage(canvasW, canvasH, BufferedImage.TYPE_INT_ARGB)
         val g = canvas.createGraphics()
+        g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR)
         val frames = ArrayList<ImageBitmap>(numFrames)
         val delays = ArrayList<Int>(numFrames)
         try {
@@ -91,7 +106,11 @@ object GifDecoder {
                 val previous = if (info.disposal == "restoreToPrevious") copyOf(canvas) else null
 
                 g.composite = AlphaComposite.SrcOver
-                g.drawImage(image, info.left, info.top, null)
+                val x0 = toCanvas(info.left)
+                val y0 = toCanvas(info.top)
+                val x1 = toCanvas(info.left + image.width)
+                val y1 = toCanvas(info.top + image.height)
+                g.drawImage(image, x0, y0, x1 - x0, y1 - y0, null)
                 frames.add(bufferedImageToImageBitmap(canvas, frameW, frameH))
                 delays.add(info.delayMs)
 
@@ -99,7 +118,7 @@ object GifDecoder {
                 when (info.disposal) {
                     "restoreToBackgroundColor" -> {
                         g.composite = AlphaComposite.Clear
-                        g.fillRect(info.left, info.top, image.width, image.height)
+                        g.fillRect(x0, y0, x1 - x0, y1 - y0)
                     }
                     "restoreToPrevious" -> if (previous != null) {
                         g.composite = AlphaComposite.Src

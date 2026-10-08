@@ -3,7 +3,6 @@ package gallery
 import org.apache.commons.compress.archivers.sevenz.SevenZArchiveEntry
 import org.apache.commons.compress.PasswordRequiredException
 import org.apache.commons.compress.archivers.sevenz.SevenZFile
-import org.apache.commons.compress.archivers.sevenz.SevenZMethod
 import org.apache.commons.compress.archivers.zip.ZipArchiveEntry
 import org.apache.commons.compress.archivers.zip.ZipFile as CompressZipFile
 import java.io.ByteArrayOutputStream
@@ -118,6 +117,7 @@ class ArchiveReader private constructor(
 
         /** 单个条目解压后的上限；再大的单张图片也用不到这么多（见 [readBounded]）。 */
         private const val MAX_ENTRY_BYTES = 512L * 1024 * 1024
+        private const val PROBE_FULL_READ_BYTES = 64L * 1024 * 1024
 
         fun isSupported(file: File): Boolean = file.extension.lowercase() in SUPPORTED_EXTENSIONS
 
@@ -143,16 +143,43 @@ class ArchiveReader private constructor(
             if (password != null) builder.setPassword(password)
             // 连文件名一起加密的 7z 在这里就会抛 PasswordRequiredException。
             val reader = ArchiveReader(null, builder.get())
-            // 只加密内容、不加密文件名的 7z 能打开、能列目录，要到读条目时才失败 ——
-            // 那样每张缩略图都各自失败一次。提前按压缩方法识别出来，统一走要密码的流程。
-            if (password == null && reader.sevenZEntries.any { e ->
-                    e.contentMethods?.any { it.method == SevenZMethod.AES256SHA256 } == true
-                }
-            ) {
+            try {
+                probeFirstEntry(reader, file.name, password)
+            } catch (t: Throwable) {
                 reader.close()
-                throw PasswordRequiredException(file.name)
+                throw t
             }
             return reader
+        }
+
+        /**
+         * 只加密内容、不加密文件名的 7z 能打开、能列目录，要到读条目时才失败 —— 那样每张缩略图
+         * 都各自失败一次。所以打开时先真读一下首个条目，统一走要密码 / 密码错误的流程。
+         *
+         * 不能按 [SevenZArchiveEntry.getContentMethods] 判断：commons-compress 只在解码时才
+         * 填它，打开阶段恒为 null（原先那样写，这个检测永远不生效）。
+         *
+         * 读的是归档顺序里的首个条目：它在 solid 块的开头，不用先解前面的数据；正常大小时整条
+         * 读完（经 [readEntry] 进缓存，后面显示首图不白读），走到流末尾才有 CRC 校验，错误密码
+         * 解出的乱码才会被发现。过大的条目只读 1 字节，只能识别「缺密码」。
+         */
+        private fun probeFirstEntry(reader: ArchiveReader, fileName: String, password: CharArray?) {
+            val sevenZ = reader.sevenZ ?: return
+            val first = reader.sevenZEntries.firstOrNull { !it.isDirectory && it.hasStream() } ?: return
+            try {
+                if (first.size <= PROBE_FULL_READ_BYTES) {
+                    reader.readEntry(first.name)
+                } else {
+                    sevenZ.getInputStream(first).use { it.read() }
+                }
+            } catch (e: PasswordRequiredException) {
+                throw PasswordRequiredException(fileName)
+            } catch (e: IOException) {
+                // 给了密码却解不出来：几乎总是密码错了，交给调用方再问一次。
+                // 没给密码时就是首个条目本身坏了 —— 不影响其余条目，照常打开。
+                if (password != null) throw e
+                AppLog.warn("7z 首个条目读取失败：$fileName!/${first.name}（${e.message}）")
+            }
         }
 
         private fun openZip(file: File): ArchiveReader {

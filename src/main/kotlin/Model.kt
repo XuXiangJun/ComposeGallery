@@ -43,9 +43,17 @@ class ArchiveSource(
  * 不复用长期打开的 [ArchiveReader]：书架上可能有几十本书，全开着会占满文件句柄
  * （Windows 上还会锁住这些压缩包，没法移动 / 删除）；而封面解码一次就进缩略图缓存，
  * 重开压缩包的代价只付一次。[openBytes] 由 [ImageLoader] 在 IO 线程上调用，不会卡 UI。
+ *
+ * [cacheKey] 带上压缩包的修改时间和大小（与 [FileSource] / [ArchiveSource] 一致）：缩略图
+ * 磁盘缓存跨重启有效，同路径重新下载 / 替换的压缩包若首图条目名不变，不带的话会一直显示旧封面。
  */
-class ArchiveCoverSource(val archiveFile: File, val entryName: String) : ImageSource {
-    override val cacheKey: String = "cover:${archiveFile.absolutePath}!/$entryName"
+class ArchiveCoverSource(
+    val archiveFile: File,
+    val entryName: String,
+    size: Long = archiveFile.length(),
+    modified: Long = archiveFile.lastModified(),
+) : ImageSource {
+    override val cacheKey: String = "cover:${archiveFile.absolutePath}!/$entryName@$modified:$size"
     override fun openBytes(): ByteArray = ArchiveReader.open(archiveFile).use { it.readEntry(entryName) }
 }
 

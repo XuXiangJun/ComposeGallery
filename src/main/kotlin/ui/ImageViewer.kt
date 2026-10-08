@@ -18,7 +18,12 @@ import gallery.copyImageToClipboard
 import gallery.openItemWithDefaultApp
 import java.awt.Toolkit
 import java.awt.image.BufferedImage
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.onStart
+import kotlinx.coroutines.flow.receiveAsFlow
 import androidx.compose.foundation.background
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -59,6 +64,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
@@ -97,6 +103,7 @@ import gallery.i18n.StringsKey
 import java.text.SimpleDateFormat
 import java.util.Date
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -261,6 +268,7 @@ fun ImageViewer(
     var loadFailed by remember(item) { mutableStateOf(false) }
     val zoom = remember { ZoomState() }
     val focusRequester = remember { FocusRequester() }
+    val scope = rememberCoroutineScope()
     var toast by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(toast) {
         if (toast != null) {
@@ -269,10 +277,15 @@ fun ImageViewer(
         }
     }
     var pointerIdle by remember { mutableStateOf(false) }
-    var moveTick by remember { mutableStateOf(0) }
-    LaunchedEffect(fullscreen, moveTick) {
+    // 鼠标移动走 conflated channel 而不是 State 计数器：原先每个 Move 事件 moveTick++，
+    // 而 moveTick 是本组件作用域读的 LaunchedEffect key —— 整个查看器（含图片绘制）按鼠标
+    // 移动频率重组，非全屏时也一样。现在只有 pointerIdle 真的翻转时才重组。
+    val pointerMoves = remember { Channel<Unit>(Channel.CONFLATED) }
+    LaunchedEffect(fullscreen) {
         pointerIdle = false
-        if (fullscreen) {
+        if (!fullscreen) return@LaunchedEffect
+        pointerMoves.receiveAsFlow().onStart { emit(Unit) }.collectLatest {
+            pointerIdle = false
             delay(AUTO_HIDE_DELAY_MS)
             pointerIdle = true
         }
@@ -312,7 +325,7 @@ fun ImageViewer(
             .background(Color.Black)
             .focusRequester(focusRequester)
             .focusable()
-            .onPointerEvent(PointerEventType.Move) { moveTick++ }
+            .onPointerEvent(PointerEventType.Move) { pointerMoves.trySend(Unit) }
             .pointerHoverIcon(if (autoHidden) BlankPointer else PointerIcon.Default)
             .onKeyEvent { e ->
                 if (e.type != KeyEventType.KeyDown) return@onKeyEvent false
@@ -443,8 +456,9 @@ fun ImageViewer(
                 onActual = { zoom.to100() },
                 onZoomIn = { zoom.zoomBy(1.25f) },
                 onZoomOut = { zoom.zoomBy(1f / 1.25f) },
-                onOpenInFolder = { openInFileManager(item.containerFile) },
-                onOpenExternal = { openItemWithDefaultApp(item) },
+                // 两者都可能阻塞（解出整条压缩包条目 / 等外部进程退出），不能放在 UI 线程上。
+                onOpenInFolder = { scope.launch(Dispatchers.IO) { openInFileManager(item.containerFile) } },
+                onOpenExternal = { scope.launch(Dispatchers.IO) { openItemWithDefaultApp(item) } },
                 onRotate = { zoom.rotateBy(90) },
                 onDelete = onDelete,
                 canDelete = item.file != null,

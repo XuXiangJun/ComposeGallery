@@ -14,10 +14,13 @@ import java.util.zip.ZipOutputStream
 import gallery.ui.ZoomState
 import javax.imageio.ImageIO
 import kotlin.test.assertEquals
+import kotlin.test.assertFails
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
+import org.apache.commons.compress.PasswordRequiredException
 import org.apache.commons.compress.archivers.sevenz.SevenZOutputFile
 import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.Test
@@ -384,6 +387,33 @@ class GalleryCoreTest {
                 assertNotNull(thumb, "$ext 条目应能解码")
                 assertEquals(100, thumb.width)
             }
+        }
+    }
+
+    /**
+     * 只加密内容、不加密文件名的 7z（7z a -p -mhe=off）：头部能读、能列目录，原先靠
+     * contentMethods 的「提前识别」恒不生效，于是不弹密码框、每张图各自失败。
+     * 现在打开时就应要密码；密码错要报错（调用方据此再问一次），密码对能正常读。
+     * 夹具由 p7zip 生成，两个条目 001.png / 002.png，密码 secret。
+     */
+    @Test
+    fun contentOnlyEncrypted7zAsksForPasswordUpFront() {
+        val archive = copyResource("archives/enc-content.7z")
+        assertFailsWith<PasswordRequiredException> { ArchiveReader.open(archive) }
+        assertFails("错误密码不应被当成能打开") { ArchiveReader.open(archive, "wrong".toCharArray()) }
+        ArchiveReader.open(archive, "secret".toCharArray()).use { reader ->
+            assertEquals(listOf("001.png", "002.png"), reader.entries.map { it.name }.sorted())
+            assertTrue(reader.readEntry("002.png").isNotEmpty())
+        }
+    }
+
+    /** 连文件名一起加密（-mhe=on）：打开时就该要密码，给对密码能读。 */
+    @Test
+    fun headerEncrypted7zAsksForPassword() {
+        val archive = copyResource("archives/enc-header.7z")
+        assertFailsWith<PasswordRequiredException> { ArchiveReader.open(archive) }
+        ArchiveReader.open(archive, "secret".toCharArray()).use { reader ->
+            assertEquals(listOf("001.png", "002.png"), reader.entries.map { it.name }.sorted())
         }
     }
 
@@ -754,7 +784,34 @@ class GalleryCoreTest {
         assertEquals(0x00, (c shr 16) and 0xFF, "差分块内应为绿色")
     }
 
+    /**
+     * GIF 的逻辑画布尺寸可以声明到 65535²，而文件本身很小。合成画布原先按这个尺寸直接分配
+     * （60000² ARGB ≈ 14GB），解码必然失败、动画退化。现在画布有上限，应能正常解出。
+     */
+    @Test
+    fun gifWithHugeLogicalScreenIsDecodedWithinBudget() {
+        val gifFile = File(tmpDir, "huge.gif")
+        makeDiffGif(gifFile)
+        // 改写 Logical Screen Descriptor（"GIF89a" 之后的两个小端 u16）为 60000×60000。
+        val bytes = gifFile.readBytes()
+        for (offset in listOf(6, 8)) {
+            bytes[offset] = (60000 and 0xFF).toByte()
+            bytes[offset + 1] = (60000 shr 8).toByte()
+        }
+        val anim = assertNotNull(GifDecoder.decode(bytes, maxDim = 8192), "超大逻辑画布不应导致解码失败")
+        assertEquals(2, anim.frames.size)
+        assertEquals(60000, anim.width, "信息面板仍报告声明的逻辑尺寸")
+        assertTrue(anim.frames.all { it.width <= 4096 && it.height <= 4096 }, "帧尺寸应受画布上限约束")
+    }
+
     // ---------- helpers ----------
+
+    private fun copyResource(path: String): File {
+        val out = File(tmpDir, path.substringAfterLast('/'))
+        val input = assertNotNull(javaClass.classLoader.getResourceAsStream(path), "缺测试资源 $path")
+        input.use { i -> out.outputStream().use { i.copyTo(it) } }
+        return out
+    }
 
     private fun writeSolidPng(file: File, w: Int, h: Int, color: Color) {
         val img = BufferedImage(w, h, BufferedImage.TYPE_INT_RGB)

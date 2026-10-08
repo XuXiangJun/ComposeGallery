@@ -406,6 +406,13 @@ fun App(
         state.saveCurrentProgress()
     }
 
+    // 缩略图大小（滑块拖动 / Ctrl+滚轮）停下 0.5s 后才写 settings.json：触控板一次滑动会连发
+    // 几十个滚轮事件，逐个写盘就是几十次同步 IO。关窗时 saveWindow 会连同 thumbSize 一起存。
+    LaunchedEffect(state.thumbSize) {
+        delay(500)
+        state.persistThumbSize()
+    }
+
     // 预取相邻图片：翻页时直接命中全尺寸缓存，不用干等解码（失败静默忽略）。
     LaunchedEffect(state.selectedIndex, state.images) {
         val i = state.selectedIndex
@@ -499,7 +506,6 @@ fun App(
                     onSearchChange = { state.searchQuery = it },
                     thumbSize = state.thumbSize,
                     onThumbSizeChange = { state.thumbSize = it },
-                    onThumbSizeChangeFinished = { state.persistThumbSize() },
                     recursive = state.recursive,
                     onRecursiveChange = {
                         state.updateRecursive(it)

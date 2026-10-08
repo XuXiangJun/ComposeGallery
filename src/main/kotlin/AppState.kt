@@ -153,8 +153,13 @@ class AppState {
         persistSettings()
     }
 
-    /** 缩略图大小滑块松手时调用：拖动过程中只改 [thumbSize]，这里才落盘。 */
-    fun persistThumbSize() = persistSettings()
+    /**
+     * 缩略图大小停止变化后由 App 合并调用：拖动 / 滚轮过程中只改 [thumbSize]，这里才落盘。
+     * 只在确实变了时写（启动时那次合并写盘也会走到这里）。
+     */
+    fun persistThumbSize() {
+        if (thumbSize != settings.thumbSize) persistSettings()
+    }
 
     fun updateSlideshowSeconds(value: Float) {
         slideshowSeconds = value.coerceIn(1f, 10f)

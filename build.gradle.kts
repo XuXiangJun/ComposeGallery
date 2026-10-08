@@ -78,7 +78,13 @@ val jdk21Launcher = javaToolchains.launcherFor {
 compose.desktop {
     application {
         mainClass = "gallery.MainKt"
-        javaHome = jdk21Launcher.get().metadata.installationPath.asFile.absolutePath
+        // 这一行在配置期求值：本机没有 JDK 21 时直接 .get() 会让 clean / tasks / IDE 同步全部失败。
+        // 降级成 Gradle 自身的 JDK，只影响打包；打出的 runtime 版本不对时 verifyPackageZip 会拦下。
+        javaHome = runCatching { jdk21Launcher.get().metadata.installationPath.asFile.absolutePath }
+            .getOrElse {
+                logger.warn("找不到 JDK 21 toolchain（${it.message?.lineSequence()?.firstOrNull()}），打包将使用 ${System.getProperty("java.home")}")
+                System.getProperty("java.home")
+            }
 
         nativeDistributions {
             // 分发包格式按平台选择：Windows -> MSI，macOS -> DMG，其余（Linux）-> DEB。
@@ -301,10 +307,18 @@ val packageZip = tasks.register<Zip>("packageZip") {
     }
 }
 
+// 任务动作里不能碰 project（配置缓存），读 zip 用注入的 ArchiveOperations。
+interface InjectedArchiveOps {
+    @get:javax.inject.Inject
+    val archiveOps: ArchiveOperations
+}
+
 // 打包产物自检：把「打包 BUILD SUCCESSFUL、程序一运行就崩」这类问题变成构建失败。
 // 真实发生过两次，packageZip 都是绿的：
 //   1) skiko 原生库没进 app/            -> LibraryLoadException
 //   2) 同基名 jar 互相覆盖（空壳赢）     -> NoClassDefFoundError
+// 前四项查的是 app image 目录；第 5 项打开 zip 本身，查 Zip 任务这一步（根层多一层目录、
+// launcher 可执行位丢失 —— 这两类也真实发生过）。
 // jpackage 只关心 --input 里有没有 jar，这两类缺失它一律不管，所以必须自己查。
 val verifyPackageZip = tasks.register("verifyPackageZip") {
     group = "verification"
@@ -316,6 +330,8 @@ val verifyPackageZip = tasks.register("verifyPackageZip") {
     val destDirFile = File(layout.buildDirectory.get().asFile, "compose/binaries/main/app")
     val appName0 = "ComposeGallery"
     val mac0 = isMac
+    val zipFileProvider = packageZip.flatMap { it.archiveFile }
+    val archiveOps = objects.newInstance<InjectedArchiveOps>().archiveOps
 
     doLast {
         val appImageDir = File(destDirFile, if (mac0) "$appName0.app" else appName0)
@@ -384,6 +400,31 @@ val verifyPackageZip = tasks.register("verifyPackageZip") {
             }
         }
 
-        logger.lifecycle("verifyPackageZip: OK（skiko 原生库 ${natives.joinToString { it.name }}；classpath 条目全部存在）")
+        // 5) zip 本身：条目与 app image 目录逐一对应（根层直接是 app image 的内容，不多套一层目录、
+        //    不漏文件），且非 Windows 上 launcher 条目带可执行位。
+        val zipFile = zipFileProvider.get().asFile
+        val zipModes = mutableMapOf<String, Int>()
+        archiveOps.zipTree(zipFile).visit {
+            if (!isDirectory) zipModes[relativePath.pathString] = permissions.toUnixNumeric()
+        }
+        val expectedPaths = appImageDir.walkTopDown().filter { it.isFile }
+            .map { it.relativeTo(appImageDir).invariantSeparatorsPath }.toSet()
+        val missingInZip = expectedPaths - zipModes.keys
+        val extraInZip = zipModes.keys - expectedPaths
+        check(missingInZip.isEmpty() && extraInZip.isEmpty()) {
+            "${zipFile.name} 与 app image 目录不一致：缺 ${missingInZip.size} 个（${missingInZip.take(5)}），" +
+                "多 ${extraInZip.size} 个（${extraInZip.take(5)}）。检查 packageZip 的 from(...) 布局。"
+        }
+        if (!win0) {
+            val launcherEntry = if (mac0) "Contents/MacOS/$appName0" else "bin/$appName0"
+            val mode = zipModes.getValue(launcherEntry)
+            check(mode and 0b001_000_000 != 0) {
+                "${zipFile.name} 里 $launcherEntry 的权限是 ${Integer.toOctalString(mode)}，没有可执行位，" +
+                    "解压后起不来。检查 packageZip 的 useFileSystemPermissions()。"
+            }
+        }
+
+        logger.lifecycle("verifyPackageZip: OK（skiko 原生库 ${natives.joinToString { it.name }}；classpath 条目全部存在；" +
+            "zip ${zipModes.size} 个条目与 app image 一致）")
     }
 }

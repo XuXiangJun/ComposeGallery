@@ -92,7 +92,7 @@ fun openWithDefaultApp(file: File) {
 
 /**
  * 用系统默认程序打开 [item]。压缩包里的条目先解到临时目录（退出时删除）再打开，
- * 外部程序没法直接读压缩包内部。
+ * 外部程序没法直接读压缩包内部。会阻塞（解压可达数百 MB），调用方应放到 IO 线程。
  */
 fun openItemWithDefaultApp(item: ImageItem) {
     val file = item.file ?: try {
