@@ -23,6 +23,7 @@ import kotlinx.coroutines.runBlocking
 import org.apache.commons.compress.PasswordRequiredException
 import org.apache.commons.compress.archivers.sevenz.SevenZOutputFile
 import org.junit.jupiter.api.AfterAll
+import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 
@@ -55,6 +56,17 @@ class GalleryCoreTest {
     @TempDir
     lateinit var tmpDir: File
 
+    /**
+     * 每个用例从干净的数据目录开始：书架 / 设置 / 缩略图磁盘缓存都在这个共享目录里，
+     * 内存缓存也是全局的。不清的话用例之间互相留下 bookshelf.json、.webp，结果依赖执行顺序，
+     * 「磁盘上有 .webp」这类断言还会被前面的用例写的文件空过。
+     */
+    @BeforeEach
+    fun resetSharedState() {
+        isolatedHome.listFiles()?.forEach { it.deleteRecursively() }
+        ImageLoader.invalidateCache()
+    }
+
     @Test
     fun fileSourceDecodesAndScales() = runBlocking {
         val png = File(tmpDir, "solid.png")
@@ -73,14 +85,34 @@ class GalleryCoreTest {
         assertEquals(300, full.height)
     }
 
+    /**
+     * 磁盘缓存里坏掉的条目要能被重新写好的覆盖掉。原先用 renameTo，Windows 上它不能覆盖
+     * 已存在的目标，坏条目永远修不好、每次都重新解码再丢弃。
+     */
+    @Test
+    fun corruptDiskThumbnailIsOverwritten() = runBlocking {
+        val png = File(tmpDir, "fix.png")
+        writeSolidPng(png, 200, 200, Color.GREEN)
+        val source = FileSource(png)
+        assertNotNull(ImageLoader.loadThumbnail(source, 64))
+        val cached = DiskThumbnailCache.dir.listFiles().orEmpty().single { it.name.endsWith(".webp") }
+        cached.writeBytes(byteArrayOf(1, 2, 3))
+
+        ImageLoader.invalidateCache()
+        assertNotNull(ImageLoader.loadThumbnail(source, 64), "坏缓存应退回解原图")
+        assertTrue(cached.length() > 3, "坏缓存条目应被新写的覆盖")
+        assertTrue(DiskThumbnailCache.dir.listFiles().orEmpty().none { it.name.endsWith(".tmp") }, "不应留下临时文件")
+    }
+
     /** 缩略图落盘后，清空内存缓存再取应命中磁盘缓存（即使原图已经读不到）。 */
     @Test
     fun thumbnailsArePersistedToDisk() = runBlocking {
         val png = File(tmpDir, "disk.png")
         writeSolidPng(png, 300, 300, Color.BLUE)
         val source = FileSource(png)
+        assertTrue(DiskThumbnailCache.dir.listFiles().orEmpty().none { it.name.endsWith(".webp") }, "前提：缓存目录是空的")
         assertNotNull(ImageLoader.loadThumbnail(source, 64))
-        assertTrue(DiskThumbnailCache.dir.listFiles().orEmpty().any { it.name.endsWith(".webp") })
+        assertEquals(1, DiskThumbnailCache.dir.listFiles().orEmpty().count { it.name.endsWith(".webp") })
 
         ImageLoader.invalidateCache()
         // 同一个 cacheKey（路径 + 修改时间 + 大小在构造时已固定），但文件内容读不到了
@@ -417,6 +449,65 @@ class GalleryCoreTest {
         }
     }
 
+    /**
+     * 同名条目（追加式压缩包常见）只保留一条：按名字只能读到其中一条，重复的留着会让
+     * LazyVerticalGrid 拿到重复 key 直接抛异常。java.util.zip 不让写重名，用 commons-compress 写。
+     */
+    @Test
+    fun duplicateZipEntriesAreListedOnce() = runBlocking {
+        val zipFile = File(tmpDir, "dup.zip")
+        org.apache.commons.compress.archivers.zip.ZipArchiveOutputStream(zipFile).use { zos ->
+            repeat(2) {
+                zos.putArchiveEntry(org.apache.commons.compress.archivers.zip.ZipArchiveEntry("001.jpg"))
+                zos.write(byteArrayOf(0))
+                zos.closeArchiveEntry()
+            }
+        }
+        ArchiveReader.open(zipFile).use { reader ->
+            assertEquals(2, reader.entries.size, "前提：压缩包里确实有两条同名条目")
+            val items = ImageScanner.scanArchive(zipFile, reader)
+            assertEquals(1, items.size)
+            assertEquals(items.size, items.map { it.source.cacheKey }.toSet().size, "网格 key 必须唯一")
+        }
+    }
+
+    /** 多章压缩包按条目完整路径排：章节不交错（原先按末段文件名排，所有 001 挤在一起）。 */
+    @Test
+    fun archiveEntriesSortByFullPath() = runBlocking {
+        val zipFile = File(tmpDir, "chapters.zip")
+        ZipOutputStream(zipFile.outputStream(), Charsets.UTF_8).use { zos ->
+            for (n in listOf("ch10/001.jpg", "ch2/002.jpg", "ch1/002.jpg", "ch2/001.jpg", "ch1/001.jpg")) {
+                zos.putNextEntry(ZipEntry(n))
+                zos.write(byteArrayOf(0))
+                zos.closeEntry()
+            }
+        }
+        ArchiveReader.open(zipFile).use { reader ->
+            val items = ImageScanner.scanArchive(zipFile, reader)
+            assertEquals(
+                listOf("ch1/001.jpg", "ch1/002.jpg", "ch2/001.jpg", "ch2/002.jpg", "ch10/001.jpg"),
+                items.map { (it.source as ArchiveSource).entryName },
+            )
+            assertEquals(items, sortImages(items.reversed(), SortMode.NAME, SortDirection.ASC), "名称排序同样按完整路径")
+        }
+    }
+
+    /** 关闭后再读条目应得到明确的 IOException，而不是撞上已关闭的 ZipFile 抛别的异常。 */
+    @Test
+    fun readAfterCloseFailsCleanly() {
+        val zipFile = File(tmpDir, "closed.zip")
+        ZipOutputStream(zipFile.outputStream(), Charsets.UTF_8).use { zos ->
+            zos.putNextEntry(ZipEntry("001.jpg"))
+            zos.write(byteArrayOf(7))
+            zos.closeEntry()
+        }
+        val reader = ArchiveReader.open(zipFile)
+        assertEquals(1, reader.readEntry("001.jpg").size)
+        reader.close()
+        reader.close() // 重复关闭无害
+        assertFailsWith<java.io.IOException> { reader.readEntry("001.jpg") }
+    }
+
     @Test
     fun cbzIsOpenedAsZip() {
         val cbz = File(tmpDir, "book.cbz")
@@ -587,6 +678,31 @@ class GalleryCoreTest {
         assertTrue(top <= 0.01f, "图片上边缘不应越过视口上边界")
         assertTrue(left + drawnW >= zoom.viewportW - 0.01f, "图片右边缘不应离开视口右边界")
         assertTrue(top + drawnH >= zoom.viewportH - 0.01f, "图片下边缘不应离开视口下边界")
+    }
+
+    /**
+     * 放大很多倍、拖到边缘后按 1（原始大小）：offset 必须收回新尺寸的范围内。
+     * to100() 原先是唯一不 clamp 的缩放入口，图片会整个飞出视口变成黑屏。
+     */
+    @Test
+    fun to100ClampsOffsetIntoViewport() {
+        val zoom = ZoomState()
+        // 4000×3000 的图放进 1000×800 的视口：fit = 0.25，铺开后 1000×750。
+        zoom.viewportW = 1000f
+        zoom.viewportH = 800f
+        zoom.fit = 0.25f
+        zoom.baseW = 1000f
+        zoom.baseH = 750f
+
+        repeat(20) { zoom.zoomAt(1.5f, androidx.compose.ui.geometry.Offset(0f, 0f)) }
+        zoom.panBy(1e6f, 1e6f) // 拖到左上角尽头
+        zoom.to100()
+
+        assertEquals(4f, zoom.scale, 0.001f, "1:1 即 1 / fit")
+        val drawnW = zoom.baseW * zoom.scale
+        val drawnH = zoom.baseH * zoom.scale
+        assertTrue(kotlin.math.abs(zoom.offsetX) <= (drawnW - zoom.viewportW) / 2f + 0.01f, "横向 offset 应在新尺寸范围内")
+        assertTrue(kotlin.math.abs(zoom.offsetY) <= (drawnH - zoom.viewportH) / 2f + 0.01f, "纵向 offset 应在新尺寸范围内")
     }
 
     /** 一路缩回适应窗口及以下时应回到居中状态，不留平移残量。 */
@@ -785,6 +901,43 @@ class GalleryCoreTest {
     }
 
     /**
+     * 三帧：红底 → (30,30) 绿块（disposal = [middleDisposal]）→ (0,0) 蓝块。
+     * 返回第 3 帧在 (35,35)（绿块位置）与 (5,5)（蓝块位置）的像素。
+     */
+    private fun thirdFramePixels(middleDisposal: String): Pair<Int, Int> {
+        val gifFile = File(tmpDir, "dispose-$middleDisposal.gif")
+        makeGif(
+            gifFile,
+            listOf(
+                GifFrame(0, 0, 40, 40, 0xFFFF0000.toInt()),
+                GifFrame(30, 30, 10, 10, 0xFF00FF00.toInt(), disposal = middleDisposal),
+                GifFrame(0, 0, 10, 10, 0xFF0000FF.toInt()),
+            ),
+        )
+        val anim = assertNotNull(GifDecoder.decode(gifFile.readBytes(), maxDim = 40))
+        assertEquals(3, anim.frames.size)
+        val pm = anim.frames[2].toPixelMap()
+        return pm.buffer[35 * pm.stride + 35] to pm.buffer[5 * pm.stride + 5]
+    }
+
+    /** restoreToBackgroundColor：下一帧开始前把本帧矩形清成透明（原先零覆盖）。 */
+    @Test
+    fun gifRestoreToBackgroundClearsPatch() {
+        val (patch, blue) = thirdFramePixels("restoreToBackgroundColor")
+        assertEquals(0, (patch ushr 24) and 0xFF, "绿块位置应被清成透明")
+        assertEquals(0xFF, blue and 0xFF, "第 3 帧自己的蓝块照常画上")
+    }
+
+    /** restoreToPrevious：下一帧开始前恢复成画本帧之前的画布（原先零覆盖）。 */
+    @Test
+    fun gifRestoreToPreviousRestoresCanvas() {
+        val (patch, blue) = thirdFramePixels("restoreToPrevious")
+        assertEquals(0xFF, (patch shr 16) and 0xFF, "绿块位置应恢复成红底")
+        assertEquals(0x00, (patch shr 8) and 0xFF, "绿块位置不应残留绿色")
+        assertEquals(0xFF, blue and 0xFF, "第 3 帧自己的蓝块照常画上")
+    }
+
+    /**
      * GIF 的逻辑画布尺寸可以声明到 65535²，而文件本身很小。合成画布原先按这个尺寸直接分配
      * （60000² ARGB ≈ 14GB），解码必然失败、动画退化。现在画布有上限，应能正常解出。
      */
@@ -873,7 +1026,19 @@ class GalleryCoreTest {
         ios.close()
     }
 
-    private fun makeDiffGif(file: File) {
+    /** 一帧 GIF：画在逻辑画布的 (left, top)，[disposal] 作用于下一帧开始之前。 */
+    private data class GifFrame(
+        val left: Int, val top: Int, val w: Int, val h: Int, val color: Int,
+        val disposal: String = "doNotDispose",
+    )
+
+    /** 两帧差分 GIF：40×40 红底，第 2 帧只在 (30,30) 更新一块 10×10 的绿色。 */
+    private fun makeDiffGif(file: File) = makeGif(
+        file,
+        listOf(GifFrame(0, 0, 40, 40, 0xFFFF0000.toInt()), GifFrame(30, 30, 10, 10, 0xFF00FF00.toInt())),
+    )
+
+    private fun makeGif(file: File, frames: List<GifFrame>) {
         val writer = ImageIO.getImageWritersByFormatName("gif").next()
         val ios = ImageIO.createImageOutputStream(file)
         writer.output = ios
@@ -889,25 +1054,26 @@ class GalleryCoreTest {
             return img
         }
 
-        fun meta(left: Int, top: Int, w: Int, h: Int): javax.imageio.metadata.IIOMetadata {
+        fun meta(f: GifFrame): javax.imageio.metadata.IIOMetadata {
             val m = writer.getDefaultImageMetadata(type, param)
             val root = m.getAsTree(m.nativeMetadataFormatName) as org.w3c.dom.Element
             val gce = root.getElementsByTagName("GraphicControlExtension").item(0) as org.w3c.dom.Element
             gce.setAttribute("delayTime", "10")
-            gce.setAttribute("disposalMethod", "doNotDispose")
+            gce.setAttribute("disposalMethod", f.disposal)
             val desc = root.getElementsByTagName("ImageDescriptor").item(0) as org.w3c.dom.Element
-            desc.setAttribute("imageLeftPosition", left.toString())
-            desc.setAttribute("imageTopPosition", top.toString())
-            desc.setAttribute("imageWidth", w.toString())
-            desc.setAttribute("imageHeight", h.toString())
+            desc.setAttribute("imageLeftPosition", f.left.toString())
+            desc.setAttribute("imageTopPosition", f.top.toString())
+            desc.setAttribute("imageWidth", f.w.toString())
+            desc.setAttribute("imageHeight", f.h.toString())
             m.setFromTree(m.nativeMetadataFormatName, root)
             return m
         }
 
-        // 逻辑画布 40×40：写入器按第一帧的尺寸生成 Logical Screen Descriptor
+        // 逻辑画布：写入器按第一帧的尺寸生成 Logical Screen Descriptor
         writer.prepareWriteSequence(null)
-        writer.writeToSequence(javax.imageio.IIOImage(solid(40, 40, 0xFFFF0000.toInt()), null, meta(0, 0, 40, 40)), param)
-        writer.writeToSequence(javax.imageio.IIOImage(solid(10, 10, 0xFF00FF00.toInt()), null, meta(30, 30, 10, 10)), param)
+        for (f in frames) {
+            writer.writeToSequence(javax.imageio.IIOImage(solid(f.w, f.h, f.color), null, meta(f)), param)
+        }
         writer.endWriteSequence()
         writer.dispose()
         ios.close()

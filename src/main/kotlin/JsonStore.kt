@@ -52,8 +52,15 @@ internal object JsonStore {
             val f = file(fileName)
             if (!f.exists()) return
             val backup = File(dir, "$fileName.corrupt-${System.currentTimeMillis()}")
-            f.renameTo(backup)
-            AppLog.warn("$fileName 无法解析，已备份为 ${backup.name}")
+            // renameTo 失败只返回 false（文件被占用、权限不足）：原先不看返回值照样记「已备份」，
+            // 坏文件随后就被下一次 save() 覆盖。改名不行就退而复制一份。
+            val saved = f.renameTo(backup) ||
+                runCatching { Files.copy(f.toPath(), backup.toPath()); true }.getOrDefault(false)
+            if (saved) {
+                AppLog.warn("$fileName 无法解析，已备份为 ${backup.name}")
+            } else {
+                AppLog.warn("$fileName 无法解析，且备份失败：下一次保存会覆盖它")
+            }
         } catch (t: Throwable) {
             AppLog.warn("备份损坏的 $fileName 失败", t)
         }

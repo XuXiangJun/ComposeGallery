@@ -79,7 +79,6 @@ import gallery.THUMB_SIZE_MIN
 import gallery.ThemeMode
 import gallery.i18n.LocalStrings
 import gallery.i18n.StringsKey
-import kotlin.math.roundToInt
 
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
@@ -621,7 +620,10 @@ private fun ThumbnailCell(
 ) {
     val colors = LocalGalleryColors.current
     val density = LocalDensity.current
-    val targetPx = (thumbSize * density.density).roundToInt().coerceIn(160, 640)
+    // 解码尺寸跟着「缩略图 dp × 屏幕密度」走，上限按 THUMB_SIZE_MAX 在 3x 屏上的需求定
+    // （原先写死 640，最大档在 2x / 3x 屏上明显偏糊）。按 64px 向上取档：拖滑块时 targetPx
+    // 不会每挪一像素就变一次 —— 每变一次就是整屏缩略图重新解码、缓存里多一份不同尺寸的副本。
+    val targetPx = ((thumbSize * density.density / 64f).toInt() + 1).times(64).coerceIn(192, 1088)
     val interaction = remember { MutableInteractionSource() }
     val hovered by interaction.collectIsHoveredAsState()
     Column(

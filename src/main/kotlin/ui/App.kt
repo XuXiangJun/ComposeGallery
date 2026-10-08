@@ -128,6 +128,9 @@ fun App(
 
     fun launchLoad(block: suspend () -> Unit) {
         loadSlot.job?.cancel()
+        // 旧加载留下的密码框作废：否则（例如拖进来另一个文件之后）再在框里点确定，
+        // 会取消掉这个更新的加载、重新去开旧的压缩包。
+        passwordRequest = null
         val job = scope.launch(start = CoroutineStart.LAZY) {
             state.loading = true
             try {

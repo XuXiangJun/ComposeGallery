@@ -144,9 +144,26 @@ private fun Char.isAsciiDigit() = this in '0'..'9'
 
 val NaturalOrder: Comparator<String> = Comparator(::naturalCompare)
 
+/**
+ * 按**完整路径**自然排序（压缩包内是条目路径，磁盘上是文件路径）。
+ *
+ * 只按末段文件名排的话，多章压缩包（`ch1/001.jpg`、`ch2/001.jpg`）和递归扫描出的子文件夹
+ * 会章节交错：所有 001 排一起、所有 002 排一起。路径先算好再排，免得比较器里反复拼字符串。
+ */
+fun sortByPath(list: List<ImageItem>): List<ImageItem> =
+    list.map { it to it.pathForSort() }
+        .sortedWith(compareBy(NaturalOrder) { it.second })
+        .map { it.first }
+
+private fun ImageItem.pathForSort(): String = when (val s = source) {
+    is ArchiveSource -> s.entryName
+    is FileSource -> s.file.path
+    else -> name
+}
+
 fun sortImages(list: List<ImageItem>, mode: SortMode, direction: SortDirection): List<ImageItem> {
     val base = when (mode) {
-        SortMode.NAME -> list.sortedWith(compareBy(NaturalOrder) { it.name })
+        SortMode.NAME -> sortByPath(list)
         SortMode.DATE -> list.sortedBy { it.modified }
         SortMode.SIZE -> list.sortedBy { it.sizeBytes }
     }

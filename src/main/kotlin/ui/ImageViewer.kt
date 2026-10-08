@@ -203,6 +203,9 @@ class ZoomState {
 
     fun to100() {
         if (fit > 0f) scale = (1f / fit).coerceIn(0.02f, 64f)
+        // 和其他缩放入口一样要收回视口：放大到 8× 拖到边缘后按 1，旧 offset 远超新上限，
+        // 不 clamp 的话图片整个飞出视口、只剩黑屏。
+        clampToViewport()
     }
 
     fun toFit() = reset()
@@ -722,7 +725,9 @@ private fun ZoomableImage(
         Canvas(
             Modifier
                 .fillMaxSize()
-                .pointerInput(bitmap) {
+                // key 用 Unit：手势只读写 zoom（稳定对象），不依赖 bitmap。原先以 bitmap 为 key，
+                // 动画 GIF 每换一帧（~100ms）手势协程就重启、丢掉进行中的拖动，播放中基本拖不动。
+                .pointerInput(Unit) {
                     detectTransformGestures { centroid, pan, zoomChange, _ ->
                         if (zoomChange != 1f) zoom.zoomAt(zoomChange, centroid)
                         zoom.panBy(pan.x, pan.y)

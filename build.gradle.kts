@@ -30,6 +30,10 @@ val isWindows = osName.startsWith("windows")
 val isMac = osName.startsWith("mac") || osName.startsWith("darwin")
 val isLinux = !isWindows && !isMac
 
+// 应用名：MSI / DEB 的 packageName、packageZip 的 app-image 目录 / launcher / .cfg 名都用它。
+// 原先四处各写一遍字面量，改了 packageName 就会让 packageZip 与 MSI/DEB 静默不一致。
+val appBaseName = "ComposeGallery"
+
 repositories {
     mavenCentral()
     google()
@@ -93,11 +97,12 @@ compose.desktop {
                 isMac -> targetFormats(TargetFormat.Dmg)
                 else -> targetFormats(TargetFormat.Deb)
             }
-            // jlink 只打进 Compose 插件探测到的模块，漏了 jdk.unsupported（sun.misc.Unsafe）。
+            // Compose 插件的 jlink 用的是插件内置的一份默认模块表，并不按依赖探测
+            // （suggestRuntimeModules 只打印建议、不生效），表里没有 jdk.unsupported（sun.misc.Unsafe）。
             // Gson 反序列化没有无参构造器的 Kotlin 类（BookEntry / RecentEntry）全靠它：缺了它，
             // 打包版每次启动读书架 / 最近打开都会失败 —— 单元测试跑在完整 JDK 上，发现不了。
             modules("jdk.unsupported")
-            packageName = "ComposeGallery"
+            packageName = appBaseName
             packageVersion = version.toString()
             description = "Compose Gallery - image viewer & comic bookshelf"
             vendor = "Compose Gallery"
@@ -165,6 +170,7 @@ val createPortableAppImage = tasks.register("createPortableAppImage") {
     val win = isWindows
     val mac = isMac
     val appVersion = version.toString()
+    val appName = appBaseName
 
     doLast {
         // 先把重名检查做在拷贝之前：等 jpackage 生成完 .cfg 才发现缺类就太晚了。
@@ -226,7 +232,6 @@ val createPortableAppImage = tasks.register("createPortableAppImage") {
         val jpackage = File(jpackageHome, "bin/$jpackageName").absolutePath
 
         destDir.mkdirs()
-        val appName = "ComposeGallery"
         // macOS 的 app-image 是 ComposeGallery.app 目录，Windows / Linux 是无扩展名的同名目录。
         val appImageDirName = if (mac) "$appName.app" else appName
         // 清理上次生成的 app image，否则 jpackage 会因目录已存在而失败。
@@ -293,11 +298,13 @@ val packageZip = tasks.register<Zip>("packageZip") {
     description = "Build a portable zip distribution (jpackage app-image)"
     dependsOn(createPortableAppImage)
     val destDir = layout.buildDirectory.dir("compose/binaries/main/app")
-    val appImageDirName = if (isMac) "ComposeGallery.app" else "ComposeGallery"
+    val appImageDirName = if (isMac) "$appBaseName.app" else appBaseName
     from(destDir.map { it.dir(appImageDirName) })
     destinationDirectory.set(destDir)
-    archiveFileName.set("ComposeGallery-$version.zip")
-    isPreserveFileTimestamps = true
+    archiveFileName.set("$appBaseName-$version.zip")
+    // 可复现：同样的输入打出逐字节相同的 zip（条目时间戳固定、顺序固定），便于校验发布产物。
+    isPreserveFileTimestamps = false
+    isReproducibleFileOrder = true
     // Gradle 9 起归档任务默认写固定权限（文件一律 644），launcher 的可执行位会丢；
     // 这里显式改回「沿用文件系统上的权限」。
     useFileSystemPermissions()
@@ -328,7 +335,7 @@ val verifyPackageZip = tasks.register("verifyPackageZip") {
 
     // 配置期抓成普通值，执行期不碰 project。
     val destDirFile = File(layout.buildDirectory.get().asFile, "compose/binaries/main/app")
-    val appName0 = "ComposeGallery"
+    val appName0 = appBaseName
     val mac0 = isMac
     val zipFileProvider = packageZip.flatMap { it.archiveFile }
     val archiveOps = objects.newInstance<InjectedArchiveOps>().archiveOps
@@ -371,7 +378,7 @@ val verifyPackageZip = tasks.register("verifyPackageZip") {
             if (rel.isEmpty()) null else File(appDir, rel).takeIf { !it.isFile }
         }
         check(missing.isEmpty()) {
-            "ComposeGallery.cfg 引用了 ${missing.size} 个不存在的 jar，" +
+            "$appName0.cfg 引用了 ${missing.size} 个不存在的 jar，" +
                 "说明拷贝阶段丢了文件（很可能是同基名 jar 互相覆盖）：" +
                 missing.take(5).joinToString { it.name }
         }

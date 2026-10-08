@@ -32,6 +32,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -52,6 +53,9 @@ import gallery.i18n.LocalStrings
 import gallery.i18n.StringsKey
 import java.io.File
 import kotlin.math.roundToInt
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 
 @Composable
 fun BookshelfScreen(
@@ -155,15 +159,21 @@ private fun BookCard(
             .clickable(interactionSource = interaction, indication = null, onClick = onOpen),
     ) {
         // 路径已经不存在（移动 / 删除 / 移动硬盘没插）：封面变灰并标出来，而不是点进去才报错。
-        // remember 住，只在条目变化时 stat 一次，不在每次重组时碰文件系统。
-        val missing = remember(book.path) { !File(book.path).exists() }
+        // 在 IO 线程上 stat（断开的网络盘可能卡好几秒），并且书架停留期间定期复查 ——
+        // 原先按路径 remember 一次，拔 / 插移动硬盘后标记不会更新。
+        val missing by produceState(initialValue = false, book.path) {
+            while (true) {
+                value = withContext(Dispatchers.IO) { !File(book.path).exists() }
+                delay(MISSING_RECHECK_MS)
+            }
+        }
         val finished = book.total > 0 && book.progress + 1 >= book.total
         Box(Modifier.fillMaxWidth().aspectRatio(1f).alpha(if (missing) 0.4f else 1f)) {
             BookCover(book, targetPx)
             if (missing || finished) {
                 Text(
                     s.t(if (missing) StringsKey.BookMissing else StringsKey.BookFinished),
-                    color = Color.White,
+                    color = if (missing) colors.onDanger else colors.onPrimary,
                     fontSize = GalleryTokens.textCaption,
                     modifier = Modifier
                         .align(Alignment.BottomStart)
@@ -218,3 +228,6 @@ private fun BookCover(book: BookEntry, targetPx: Int) {
     }
     Thumbnail(source, book.name, targetPx, Modifier.fillMaxSize())
 }
+
+/** 书架停留期间复查「路径是否还在」的间隔（拔 / 插移动硬盘后标记能跟上）。 */
+private const val MISSING_RECHECK_MS = 5_000L

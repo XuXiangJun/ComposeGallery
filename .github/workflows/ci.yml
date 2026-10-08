@@ -105,7 +105,8 @@ jobs:
           done
           ls -l dist
 
-      - uses: softprops/action-gh-release@v2
+      # 钉到 commit SHA（v2.6.2）：这个 job 有 contents: write，可移动的 tag 一旦被改指向就能拿到写权限。
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           files: dist/*.zip
           generate_release_notes: true

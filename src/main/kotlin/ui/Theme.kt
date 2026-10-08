@@ -33,6 +33,7 @@ data class GalleryColors(
     val outline: Color,             // 默认边框
     val outlineHover: Color,        // hover 边框
     val danger: Color,
+    val onDanger: Color,            // danger 上的文字色，保证对比度
     val placeholder: Color,         // 缩略图 / 占位底
 )
 
@@ -64,6 +65,7 @@ val DarkGalleryColors = GalleryColors(
     outline = Color(0xFF3A3A3C),
     outlineHover = Color(0xFF4FC3F7),
     danger = Color(0xFFE57373),
+    onDanger = Color(0xFF2B0A0A), // 白字压在 #E57373 上只有 3.0:1，深字 6.1:1
     placeholder = Color(0xFF2A2A2D),
 )
 
@@ -83,6 +85,7 @@ val LightGalleryColors = GalleryColors(
     outline = Color(0xFFCFCFD2),
     outlineHover = Color(0xFF0277BD),
     danger = Color(0xFFC62828),
+    onDanger = Color(0xFFFFFFFF),
     placeholder = Color(0xFFE2E3E6),
 )
 

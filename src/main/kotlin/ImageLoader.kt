@@ -4,11 +4,16 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asSkiaBitmap
 import androidx.compose.ui.graphics.toComposeImageBitmap
 import java.io.File
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 import java.util.LinkedHashMap
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import org.jetbrains.skia.Bitmap
@@ -83,19 +88,27 @@ internal object DiskThumbnailCache {
     /** 每写入这么多次检查一次总量（遍历目录不便宜，不必每次都做）。 */
     private const val PRUNE_EVERY = 200
 
+    /** 读命中时刷新「最近访问时间」的最小间隔。 */
+    private const val TOUCH_INTERVAL_MS = 60L * 60 * 1000
+
     private val writes = AtomicInteger()
 
     val dir: File get() = File(JsonStore.dir, "thumbs")
 
     private fun fileFor(key: String): File {
-        val digest = MessageDigest.getInstance("SHA-1").digest(key.toByteArray())
+        // 显式 UTF-8：按平台默认字符集编码时，GBK 等编码表示不了的路径字符会被替换成 '?'，
+        // 不同的 key 可能算出同一个文件名 → 串图。
+        val digest = MessageDigest.getInstance("SHA-1").digest(key.toByteArray(Charsets.UTF_8))
         return File(dir, digest.joinToString("") { "%02x".format(it) } + ".webp")
     }
 
     fun read(key: String): ByteArray? = try {
         val f = fileFor(key)
         if (f.isFile) {
-            f.setLastModified(System.currentTimeMillis()) // 充当「最近访问时间」，淘汰时用
+            // 修改时间充当「最近访问时间」，淘汰时用。只在明显过时才刷新：每次命中都写一次
+            // 元数据，滚动一屏缩略图就是几十次文件系统写；LRU 精度到小时级足够。
+            val now = System.currentTimeMillis()
+            if (now - f.lastModified() > TOUCH_INTERVAL_MS) f.setLastModified(now)
             f.readBytes()
         } else {
             null
@@ -113,8 +126,14 @@ internal object DiskThumbnailCache {
             val target = fileFor(key)
             // 先写临时文件再 move：并发写同一个 key、或写到一半退出，都不会留下半截文件。
             val tmp = File.createTempFile(target.name, ".tmp", dir)
-            tmp.writeBytes(bytes)
-            if (!tmp.renameTo(target)) tmp.delete()
+            try {
+                tmp.writeBytes(bytes)
+                // 不用 renameTo：Windows 上它不能覆盖已存在的目标（返回 false），坏掉的缓存条目
+                // 就永远修不好、每次都要重新解码再丢弃。
+                Files.move(tmp.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING)
+            } finally {
+                tmp.delete() // move 成功后它已不存在，这里只清理失败留下的
+            }
             if (writes.incrementAndGet() % PRUNE_EVERY == 1) prune()
         } catch (t: Throwable) {
             AppLog.warn("写缩略图缓存失败（${t.message}）")
@@ -123,6 +142,10 @@ internal object DiskThumbnailCache {
 
     fun prune() {
         try {
+            // 写到一半被杀留下的 .tmp：正在写的那个不会超过几秒，按一小时为界清掉旧的。
+            val staleBefore = System.currentTimeMillis() - TOUCH_INTERVAL_MS
+            dir.listFiles { f -> f.isFile && f.name.endsWith(".tmp") && f.lastModified() < staleBefore }
+                ?.forEach { it.delete() }
             val files = dir.listFiles { f -> f.isFile && f.name.endsWith(".webp") }?.toList() ?: return
             var total = files.sumOf { it.length() }
             if (total <= MAX_BYTES) return
@@ -147,6 +170,18 @@ object ImageLoader {
      * 一半名额，翻页那一刻网格缩略图明显变慢。
      */
     private val fullSemaphore = Semaphore(2)
+
+    /**
+     * 预取再单独一个名额：原先预取和翻页共用 [fullSemaphore]，连续翻页时前后两个预取占满名额，
+     * 用户真正要看的那张反而排在它们后面。
+     */
+    private val prefetchSemaphore = Semaphore(1)
+
+    /**
+     * 同一张图的全尺寸解码串行化：预取正在解 X 时用户翻到 X，原先会再解一遍。现在后到的等
+     * 前一个解完、直接命中缓存。只在没人持有时移除，map 不会随浏览无限增长。
+     */
+    private val fullDecodeLocks = ConcurrentHashMap<String, Mutex>()
 
     /** 缩略图像素缓存上限（约 96MB）。 */
     private const val THUMBNAIL_CACHE_BYTES = 96L * 1024 * 1024
@@ -196,23 +231,34 @@ object ImageLoader {
         }
     }
 
-    suspend fun loadFull(source: ImageSource, maxDim: Int = 8192): LoadedImage? {
-        val key = "${source.cacheKey}?$maxDim"
-        fullCache.get(key)?.let { return it }
-        return fullSemaphore.withPermit {
-            fullCache.get(key)?.let { return@withPermit it }
-            withContext(decodeDispatcher) {
-                runCatching { decodeFull(source.openBytes(), maxDim) }
-                    .onFailure { AppLog.warn("图片解码失败：${source.cacheKey}", it) }
-                    .getOrNull()
-                    ?.also { fullCache.put(key, it) }
-            }
-        }
-    }
+    suspend fun loadFull(source: ImageSource, maxDim: Int = 8192): LoadedImage? =
+        loadFullWith(source, maxDim, fullSemaphore)
 
     /** 预取相邻图片：结果直接进全尺寸缓存，翻页时命中；失败静默忽略。 */
     suspend fun prefetch(source: ImageSource, maxDim: Int = 8192) {
-        loadFull(source, maxDim)
+        loadFullWith(source, maxDim, prefetchSemaphore)
+    }
+
+    private suspend fun loadFullWith(source: ImageSource, maxDim: Int, permits: Semaphore): LoadedImage? {
+        val key = "${source.cacheKey}?$maxDim"
+        fullCache.get(key)?.let { return it }
+        val lock = fullDecodeLocks.computeIfAbsent(key) { Mutex() }
+        try {
+            return lock.withLock {
+                fullCache.get(key)?.let { return@withLock it }
+                permits.withPermit {
+                    withContext(decodeDispatcher) {
+                        runCatching { decodeFull(source.openBytes(), maxDim) }
+                            .onFailure { AppLog.warn("图片解码失败：${source.cacheKey}", it) }
+                            .getOrNull()
+                            ?.also { fullCache.put(key, it) }
+                    }
+                }
+            }
+        } finally {
+            // 极少数情况下别人刚拿到这把锁就被移除，最坏只是同一张图多解一次，不影响正确性。
+            if (!lock.isLocked) fullDecodeLocks.remove(key, lock)
+        }
     }
 
     private fun decodeFull(bytes: ByteArray, maxDim: Int): LoadedImage {

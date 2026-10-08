@@ -14,6 +14,8 @@ import java.nio.charset.CharacterCodingException
 import java.nio.charset.Charset
 import java.nio.charset.StandardCharsets
 import java.util.LinkedHashMap
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 
 /**
  * 读取压缩包内条目的统一封装。
@@ -56,8 +58,28 @@ class ArchiveReader private constructor(
      */
     private val entryCache = LinkedHashMap<String, ByteArray>(8, 0.75f, true)
 
-    @Synchronized
+    /**
+     * 读条目与关闭互斥。不用 @Synchronized close()：切换图集时 close 在 UI 线程上调用，
+     * 而后台可能正在解一个大 7z 条目（几秒）—— 同步等它会卡住界面。所以 [close] 只在拿得到
+     * 锁时当场关；拿不到就记下请求，由正在读的那次 [readEntry] 结束后关。
+     */
+    private val lock = ReentrantLock()
+    @Volatile private var closeRequested = false
+    private var closed = false // 由 lock 保护
+
     fun readEntry(name: String): ByteArray {
+        try {
+            return lock.withLock { readEntryLocked(name) }
+        } finally {
+            // close() 发现锁被占时只置了标记：由最后一个读者代为关闭。
+            if (closeRequested && lock.tryLock()) {
+                try { closeLocked() } finally { lock.unlock() }
+            }
+        }
+    }
+
+    private fun readEntryLocked(name: String): ByteArray {
+        if (closeRequested) throw IOException("压缩包已关闭：$name")
         entryCache[name]?.let { return it }
         val bytes = when {
             zip != null -> {
@@ -93,8 +115,10 @@ class ArchiveReader private constructor(
     }
 
     private fun cachePut(name: String, bytes: ByteArray) {
+        // 单个条目就超出总预算的不进缓存：原先靠「至少留一个」的守卫，最大 512MB 的条目会常驻。
+        if (bytes.size > ENTRY_CACHE_BYTES) return
         entryCache[name] = bytes
-        while ((entryCache.size > ENTRY_CACHE_COUNT || cacheBytes() > ENTRY_CACHE_BYTES) && entryCache.size > 1) {
+        while (entryCache.size > ENTRY_CACHE_COUNT || cacheBytes() > ENTRY_CACHE_BYTES) {
             val eldest = entryCache.keys.firstOrNull() ?: break
             entryCache.remove(eldest)
         }
@@ -103,6 +127,15 @@ class ArchiveReader private constructor(
     private fun cacheBytes(): Long = entryCache.values.sumOf { it.size.toLong() }
 
     override fun close() {
+        closeRequested = true
+        if (lock.tryLock()) {
+            try { closeLocked() } finally { lock.unlock() }
+        }
+    }
+
+    private fun closeLocked() {
+        if (closed) return
+        closed = true
         entryCache.clear()
         try { zip?.close() } catch (_: Throwable) {}
         try { sevenZ?.close() } catch (_: Throwable) {}

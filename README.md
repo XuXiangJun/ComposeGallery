@@ -8,7 +8,7 @@
 - 打开压缩包（**zip / cbz / 7z / cb7**），直接浏览压缩包内的图片（无需解压）；加密的 7z 会弹框要密码，
   加密的 zip 暂不支持（会明确提示）；自动跳过 macOS 的 `__MACOSX/`、`._xxx` 元数据
 - 拖文件夹 / 压缩包 / 图片到窗口即可打开；也可作为命令行参数（「打开方式」/ 文件关联）传入
-- 文件名**自然排序**（`2.jpg` 排在 `10.jpg` 前面）
+- 文件名**自然排序**（`2.jpg` 排在 `10.jpg` 前面）；按完整路径排，多章压缩包 / 子文件夹按章节分组，不会交错
 - 缩略图网格（自适应列数、可调大小、悬停高亮、加载骨架占位）
 - 可选递归扫描子文件夹
 - 排序：名称 / 修改时间 / 大小，支持升序 / 降序
@@ -114,7 +114,8 @@ WiX 3（约 34 MB，缓存到 Gradle 用户目录下的 `compose-jb/wix311.zip`�
 
 - **runtime 必须是 JDK 21**。Compose 的 jlink 默认用「跑 Gradle 的那个 JDK」；Gradle 跑在 JDK 17 上时，
   打出来的程序一启动就 `UnsupportedClassVersionError`。所以 `compose.desktop.application.javaHome`
-  显式指向 toolchain 的 JDK 21。
+  显式指向 toolchain 的 JDK 21。本机找不到 JDK 21 时这里会告警并退回 Gradle 自身的 JDK
+  （`clean`、IDE 同步不受影响），但打出来的包会被下面的 `verifyPackageZip` 拦下。
 - **runtime 要带 `jdk.unsupported`**。Gson 反序列化 `BookEntry` / `RecentEntry` 依赖 `sun.misc.Unsafe`，
   缺了它打包版每次启动都读不回书架和最近打开（单元测试跑在完整 JDK 上，发现不了）。
 
@@ -131,14 +132,15 @@ WiX 3（约 34 MB，缓存到 Gradle 用户目录下的 `compose-jb/wix311.zip`�
 
 `verifyPackageZip` 会检查：skiko 原生库在 app 目录里、`.cfg` 引用的 jar 都存在、runtime 版本 ≥ 21
 且含 `jdk.unsupported`、非 Windows 上 launcher 可执行（app 目录位置按平台区分：Windows `app/`、
-Linux `lib/app/`、macOS `Contents/app/`）。
+Linux `lib/app/`、macOS `Contents/app/`），并打开 zip 本身核对：条目与 app image 目录一一对应
+（根层不多套一层目录、不漏文件）、非 Windows 上 launcher 条目带可执行位。
 
 ### CI
 
-仓库带 `.github/workflows/ci.yml`：push / PR 到 `master` 时，在 `ubuntu-latest` 与
-`windows-latest` 上以 Temurin JDK 21 跑 `./gradlew test`，再跑一遍 `./gradlew packageZip`
-（jpackage app-image，不需要 WiX），产物上传为 artifact；推送 `v*` tag 时额外把各平台 zip
-发布到 GitHub Release。macOS 暂未纳入打包矩阵：
+仓库带 `.github/workflows/ci.yml`：push 到 `master` / `dev` 及所有 PR 时，在 `ubuntu-latest` 与
+`windows-latest` 上以 Temurin JDK 21 跑 `./gradlew test`，再跑 `./gradlew packageZip`
+（jpackage app-image，不需要 WiX）和 `./gradlew verifyPackageZip`，产物上传为 artifact；推送 `v*` tag
+时额外由 release job 把各平台 zip 发布到 GitHub Release（发布 action 钉在 commit SHA 上）。macOS 暂未纳入打包矩阵：
 `.app` 内含符号链接、`packageZip` 的 macOS 路径尚未验证过（见上文 TODO）。
 
 ### 沙箱 / 受限环境构建

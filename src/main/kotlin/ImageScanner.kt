@@ -99,6 +99,9 @@ object ImageScanner {
                     !it.isDirectory && !isMacMetadata(it.name) &&
                         it.name.substringAfterLast('/').substringAfterLast('.', "").lowercase() in EXTENSIONS
                 }
+                // zip 允许同名条目（追加式压缩包常见），而按名字读只能读到其中一条；重复的留着
+                // 只会让 LazyVerticalGrid 拿到重复 key 直接抛 IllegalArgumentException。
+                .distinctBy { it.name }
                 .map { e ->
                     val displayName = e.name.substringAfterLast('/')
                     ImageItem(
@@ -108,6 +111,6 @@ object ImageScanner {
                         e.modified,
                     )
                 }
-                .sortedWith(compareBy(NaturalOrder) { it.name })
+                .let(::sortByPath)
         }
 }
